@@ -317,61 +317,150 @@ def summarize_manifest(manifest: pd.DataFrame, label: str) -> pd.DataFrame:
 # Timestamp / period parsing that respects first-of-month / first-of-quarter storage.
 # --------------------------------------------------------------------------------------
 
+
 _QUARTER_PATTERNS = [
     re.compile(r"^\s*(?P<y>\d{4})\s*[:\-]?\s*[Qq](?P<q>[1-4])\s*$"),
     re.compile(r"^\s*(?P<y>\d{4})\s*[Qq](?P<q>[1-4])\s*$"),
 ]
+
+_QUARTER_NUMBER_PATTERN = re.compile(r"^\s*(?P<y>\d{4})\s*[:\-]\s*(?P<q>0?[1-4])\s*$")
+_YEARMONTH_CODE_PATTERN = re.compile(r"^\s*(?P<y>\d{4})[mM](?P<m>\d{2})\s*$")
+_YEARMONTH_SEP_PATTERN = re.compile(r"^\s*(?P<y>\d{4})\s*[:\-/]\s*(?P<m>0?[1-9]|1[0-2])\s*$")
+_RTDMS_MONTHLY_VINTAGE_PATTERN = re.compile(r"^\s*ROUTPUT(?P<yy>\d{2})[mM](?P<m>\d{1,2})\s*$", flags=re.IGNORECASE)
+_RTDMS_QUARTERLY_VINTAGE_PATTERN = re.compile(r"^\s*ROUTPUT(?P<yy>\d{2})[qQ](?P<q>[1-4])\s*$", flags=re.IGNORECASE)
+_GDPPLUS_RELEASE_PATTERN = re.compile(r"^\s*GDPPLUS[_\-]?(?P<mm>\d{2})(?P<dd>\d{2})(?P<yy>\d{2})\s*$", flags=re.IGNORECASE)
+
+
+def _two_digit_year_to_four_digit(yy: int) -> int:
+    yy = int(yy)
+    return 1900 + yy if yy >= 50 else 2000 + yy
+
+
+def _quarter_number_to_period(year: int, quarter: int) -> pd.Period:
+    return pd.Period(f"{int(year):04d}Q{int(quarter)}", freq="Q")
+
+
+def _quarter_vintage_to_month_period(year: int, quarter: int) -> pd.Period:
+    month = {1: 2, 2: 5, 3: 8, 4: 11}[int(quarter)]
+    return pd.Period(f"{int(year):04d}-{int(month):02d}", freq="M")
+
+
+def _parse_routput_vintage_period(text: str) -> Optional[pd.Period]:
+    match = _RTDMS_MONTHLY_VINTAGE_PATTERN.match(text)
+    if match:
+        year = _two_digit_year_to_four_digit(int(match.group("yy")))
+        month = int(match.group("m"))
+        return pd.Period(f"{year:04d}-{month:02d}", freq="M")
+
+    match = _RTDMS_QUARTERLY_VINTAGE_PATTERN.match(text)
+    if match:
+        year = _two_digit_year_to_four_digit(int(match.group("yy")))
+        quarter = int(match.group("q"))
+        return _quarter_vintage_to_month_period(year, quarter)
+
+    return None
+
+
+def _parse_gdpplus_release_timestamp(text: str) -> Optional[pd.Timestamp]:
+    match = _GDPPLUS_RELEASE_PATTERN.match(text)
+    if not match:
+        return None
+    month = int(match.group("mm"))
+    day = int(match.group("dd"))
+    year = _two_digit_year_to_four_digit(int(match.group("yy")))
+    try:
+        return pd.Timestamp(year=year, month=month, day=day)
+    except Exception:
+        return None
+
+
+def _looks_like_explicit_quarter_label(text: str) -> bool:
+    return any(pattern.match(text) for pattern in _QUARTER_PATTERNS) or _QUARTER_NUMBER_PATTERN.match(text) is not None
+
+
+def _looks_like_explicit_month_label(text: str) -> bool:
+    return (
+        _YEARMONTH_CODE_PATTERN.match(text) is not None
+        or _RTDMS_MONTHLY_VINTAGE_PATTERN.match(text) is not None
+        or _RTDMS_QUARTERLY_VINTAGE_PATTERN.match(text) is not None
+        or _GDPPLUS_RELEASE_PATTERN.match(text) is not None
+    )
 
 
 def parse_periodish(value: Any, freq_hint: Optional[str] = None) -> Optional[pd.Period]:
     """
     Parse month-like or quarter-like values to a pandas Period without shifting
     to month-end. The function intentionally preserves first-of-period semantics.
+
+    Important design rule for this repository:
+    - plain first-day timestamps like 2026-01-01 default to monthly semantics
+      unless the caller explicitly asks for quarterly parsing.
     """
     if value is None:
         return None
     if isinstance(value, float) and math.isnan(value):
         return None
     if isinstance(value, pd.Period):
+        if freq_hint == "Q":
+            return value.asfreq("Q")
+        if freq_hint == "M":
+            return value.asfreq("M")
         return value
     if isinstance(value, pd.Timestamp):
         if freq_hint == "Q":
             return value.to_period("Q")
-        # Default to month semantics unless the caller explicitly requests quarterly
-        # parsing. This avoids reclassifying first-of-quarter timestamps as quarter
-        # markers when they actually represent month labels like 2000-01-01.
         return value.to_period("M")
 
     text = str(value).strip()
     if text == "":
         return None
 
+    routput_period = _parse_routput_vintage_period(text)
+    if routput_period is not None:
+        if freq_hint == "Q":
+            return routput_period.asfreq("Q")
+        return routput_period
+
+    gdpplus_release_ts = _parse_gdpplus_release_timestamp(text)
+    if gdpplus_release_ts is not None:
+        if freq_hint == "Q":
+            return gdpplus_release_ts.to_period("Q")
+        return gdpplus_release_ts.to_period("M")
+
     for pattern in _QUARTER_PATTERNS:
         match = pattern.match(text)
         if match:
-            y = int(match.group("y"))
-            q = int(match.group("q"))
-            return pd.Period(f"{y}Q{q}", freq="Q")
+            return _quarter_number_to_period(int(match.group("y")), int(match.group("q")))
 
-    # Handle "YYYYmMM" or "YYYYMMM" style labels
-    match = re.match(r"^\s*(?P<y>\d{4})[mM](?P<m>\d{2})\s*$", text)
+    match = _QUARTER_NUMBER_PATTERN.match(text)
     if match:
-        return pd.Period(f"{int(match.group('y')):04d}-{int(match.group('m')):02d}", freq="M")
+        return _quarter_number_to_period(int(match.group("y")), int(match.group("q")))
 
-    # Try full timestamps or first-day period markers.
+    match = _YEARMONTH_CODE_PATTERN.match(text)
+    if match:
+        year = int(match.group("y"))
+        month = int(match.group("m"))
+        if freq_hint == "Q" and month in (1, 4, 7, 10):
+            return _quarter_number_to_period(year, ((month - 1) // 3) + 1)
+        return pd.Period(f"{year:04d}-{month:02d}", freq="M")
+
+    match = _YEARMONTH_SEP_PATTERN.match(text)
+    if match:
+        year = int(match.group("y"))
+        month = int(match.group("m"))
+        if freq_hint == "Q" and month in (1, 4, 7, 10):
+            return _quarter_number_to_period(year, ((month - 1) // 3) + 1)
+        return pd.Period(f"{year:04d}-{month:02d}", freq="M")
+
     try:
         ts = pd.to_datetime(text, errors="raise")
         if freq_hint == "Q":
             return ts.to_period("Q")
         if freq_hint == "M":
             return ts.to_period("M")
-        if ts.day == 1 and ts.month in (1, 4, 7, 10):
-            # Quarter-like if quarter starts only.
-            return ts.to_period("Q")
         return ts.to_period("M")
     except Exception:
         return None
-
 
 def parse_timestamp_series(values: pd.Series, freq_hint: Optional[str] = None) -> pd.Series:
     """
@@ -385,50 +474,60 @@ def parse_timestamp_series(values: pd.Series, freq_hint: Optional[str] = None) -
     return out
 
 
+
 def infer_period_frequency_from_values(values: Sequence[Any]) -> Optional[str]:
     """
-    Infer whether a collection of labels is monthly or quarterly, while
-    respecting the repository's first-day timestamp convention.
-
-    The logic intentionally avoids forcing first-of-quarter timestamps like
-    2025-01-01 to quarterly unless the *sequence* behaves like quarterly data.
+    Infer whether a collection of labels is monthly or quarterly while respecting
+    repository first-day semantics and the RTDSM / GDPplus workbook conventions.
     """
     explicit_quarter_hits = 0
+    explicit_month_hits = 0
     timestamps: List[pd.Timestamp] = []
+
     for value in values:
         if value is None or (isinstance(value, float) and math.isnan(value)):
             continue
+
         text = str(value).strip()
         if text == "":
             continue
-        if any(pattern.match(text) for pattern in _QUARTER_PATTERNS):
+
+        if _looks_like_explicit_quarter_label(text):
             explicit_quarter_hits += 1
-            try:
-                p = parse_periodish(text, freq_hint="Q")
-                if p is not None:
-                    timestamps.append(p.to_timestamp())
-            except Exception:
-                pass
+            p = parse_periodish(text, freq_hint="Q")
+            if p is not None:
+                timestamps.append(p.to_timestamp())
             continue
+
+        if _looks_like_explicit_month_label(text):
+            explicit_month_hits += 1
+            p = parse_periodish(text, freq_hint="M")
+            if p is not None:
+                timestamps.append(p.to_timestamp())
+            continue
+
         try:
             ts = pd.to_datetime(value, errors="raise")
             timestamps.append(pd.Timestamp(ts))
         except Exception:
             continue
 
+    if explicit_quarter_hits and explicit_quarter_hits >= max(3, explicit_month_hits + 1):
+        return "Q"
+    if explicit_month_hits and explicit_month_hits >= max(3, explicit_quarter_hits + 1):
+        return "M"
+
     if not timestamps:
         return None
 
-    if explicit_quarter_hits / len(timestamps) > 0.5:
-        return "Q"
-
     ordinals = np.array([ts.year * 12 + ts.month for ts in timestamps], dtype=int)
     ordinals = np.unique(np.sort(ordinals))
-    quarter_like_month_sets = ({1, 4, 7, 10}, {3, 6, 9, 12})
+    quarter_like_month_sets = ({1, 4, 7, 10}, {2, 5, 8, 11}, {3, 6, 9, 12})
+
     if len(ordinals) >= 2:
         diffs = np.diff(ordinals)
         if len(diffs) > 0:
-            month_set = set((ordinals - 1) % 12 + 1)
+            month_set = set((o - 1) % 12 + 1 for o in ordinals)
             if np.mean(diffs == 3) > 0.8 and any(month_set.issubset(s) for s in quarter_like_month_sets):
                 return "Q"
             if np.mean(diffs == 1) > 0.8:
@@ -438,7 +537,6 @@ def infer_period_frequency_from_values(values: Sequence[Any]) -> Optional[str]:
     if any(months.issubset(s) for s in quarter_like_month_sets) and len(ordinals) >= 4:
         return "Q"
     return "M"
-
 
 # --------------------------------------------------------------------------------------
 # CSV inspection and FRED snapshot loading
@@ -756,6 +854,7 @@ def _score_matrix_candidate(values: List[List[Any]], header_row: int, index_col:
     }
 
 
+
 def extract_best_period_matrix(path: Path, required_col_freq: Optional[str] = None) -> Dict[str, Any]:
     """
     Search workbook sheets for a vintage-by-observation matrix where either rows
@@ -774,8 +873,8 @@ def extract_best_period_matrix(path: Path, required_col_freq: Optional[str] = No
 
         n_rows = len(values)
         n_cols = max(len(r) for r in values)
-        for header_row in range(min(6, n_rows)):
-            for index_col in range(min(4, n_cols)):
+        for header_row in range(min(8, n_rows)):
+            for index_col in range(min(6, n_cols)):
                 cand = _score_matrix_candidate(values, header_row, index_col)
                 if cand["score"] < 0:
                     continue
@@ -788,9 +887,8 @@ def extract_best_period_matrix(path: Path, required_col_freq: Optional[str] = No
     if not candidates:
         raise ValueError(f"Could not find a date-like matrix in workbook: {path}")
 
-    # Prefer matrices with quarterly observation labels somewhere.
     def ranking_key(c: Dict[str, Any]) -> Tuple[int, float]:
-        has_required = int(c.get("row_freq") == required_col_freq or c.get("col_freq") == required_col_freq)
+        has_required = int(required_col_freq is None or c.get("row_freq") == required_col_freq or c.get("col_freq") == required_col_freq)
         return (has_required, float(c["score"]))
 
     best = sorted(candidates, key=ranking_key, reverse=True)[0]
@@ -805,12 +903,25 @@ def extract_best_period_matrix(path: Path, required_col_freq: Optional[str] = No
     row_periods = [parse_periodish(v, freq_hint=row_freq) for v in raw_row_labels]
     col_periods = [parse_periodish(v, freq_hint=col_freq) for v in raw_col_labels]
 
-    body = []
+    body_rows: List[List[float]] = []
     for i in range(header_row + 1, len(values)):
         row = values[i] + [None] * (len(raw_col_labels) + index_col + 1 - len(values[i]))
-        body.append([pd.to_numeric(x, errors="coerce") for x in row[index_col + 1 : index_col + 1 + len(raw_col_labels)]])
-    matrix = pd.DataFrame(body, index=row_periods, columns=col_periods)
-    matrix = matrix.dropna(how="all").dropna(axis=1, how="all")
+        body_rows.append([pd.to_numeric(x, errors="coerce") for x in row[index_col + 1 : index_col + 1 + len(raw_col_labels)]])
+
+    body_df = pd.DataFrame(body_rows)
+    row_keep = ~body_df.isna().all(axis=1)
+    col_keep = ~body_df.isna().all(axis=0)
+
+    kept_row_periods = [p for p, keep in zip(row_periods, row_keep) if bool(keep)]
+    kept_col_periods = [p for p, keep in zip(col_periods, col_keep) if bool(keep)]
+    kept_raw_row_labels = [v for v, keep in zip(raw_row_labels, row_keep) if bool(keep)]
+    kept_raw_col_labels = [v for v, keep in zip(raw_col_labels, col_keep) if bool(keep)]
+
+    matrix = pd.DataFrame(
+        body_df.loc[row_keep, col_keep].to_numpy(),
+        index=kept_row_periods,
+        columns=kept_col_periods,
+    )
 
     return {
         "sheet_name": best["sheet_name"],
@@ -821,8 +932,9 @@ def extract_best_period_matrix(path: Path, required_col_freq: Optional[str] = No
         "matrix": matrix,
         "raw_row_labels": raw_row_labels,
         "raw_col_labels": raw_col_labels,
+        "kept_raw_row_labels": kept_raw_row_labels,
+        "kept_raw_col_labels": kept_raw_col_labels,
     }
-
 
 def melt_vintage_matrix(matrix_info: Dict[str, Any], value_name: str = "value") -> pd.DataFrame:
     matrix = matrix_info["matrix"].copy()
@@ -874,10 +986,11 @@ def load_routput_vintage_history(path: Path) -> pd.DataFrame:
     return long
 
 
+
 def _candidate_excel_tables(path: Path) -> Iterator[Tuple[str, int, pd.DataFrame]]:
     xl = pd.ExcelFile(path)
     for sheet in xl.sheet_names:
-        for header in range(0, 5):
+        for header in range(0, 10):
             try:
                 df = pd.read_excel(path, sheet_name=sheet, header=header)
             except Exception:
@@ -887,7 +1000,6 @@ def _candidate_excel_tables(path: Path) -> Iterator[Tuple[str, int, pd.DataFrame
             df = df.copy()
             df.columns = [normalize_column_name(c).lower() for c in df.columns]
             yield sheet, header, df
-
 
 def _find_period_column(df: pd.DataFrame) -> Optional[str]:
     best_col = None
@@ -900,64 +1012,190 @@ def _find_period_column(df: pd.DataFrame) -> Optional[str]:
     return best_col if best_score > 0.5 else None
 
 
+
 def load_release_truth_table(path: Path) -> pd.DataFrame:
     """
-    Attempt to load a first/second/third release GDP workbook into a tidy table.
+    Load the RTDSM first/second/third workbook into a tidy table.
 
     Expected output columns:
-        quarter, first_release, second_release, third_release
+        quarter, first_release, second_release, third_release, latest
     """
-    best: Optional[pd.DataFrame] = None
-    best_score = -1.0
+    alias_map = {
+        "quarter": ["date", "quarter"],
+        "first_release": ["first", "first_release"],
+        "second_release": ["second", "second_release"],
+        "third_release": ["third", "third_release"],
+        "latest": ["most_recent", "mostrecent", "latest"],
+    }
 
-    for sheet, header, df in _candidate_excel_tables(path):
-        period_col = _find_period_column(df)
+    best_df: Optional[pd.DataFrame] = None
+    best_period_col: Optional[str] = None
+    best_score = -np.inf
+
+    for _, header, df in _candidate_excel_tables(path):
+        cols = list(df.columns)
+        period_candidates = [c for c in cols if c in alias_map["quarter"]]
+        period_col = period_candidates[0] if period_candidates else _find_period_column(df)
         if period_col is None:
             continue
 
-        cols_lower = list(df.columns)
+        found: Dict[str, str] = {}
         score = 0.0
-        release_cols = {}
-        for key in ["first", "second", "third", "latest", "mean", "median", "gdpplus"]:
-            matches = [c for c in cols_lower if key in str(c).lower()]
-            if matches:
-                release_cols[key] = matches[0]
-                score += 1.0
+
+        for canonical, aliases in alias_map.items():
+            if canonical == "quarter":
+                continue
+            for alias in aliases:
+                exact = [c for c in cols if c == alias]
+                prefix = [c for c in cols if c.startswith(alias)]
+                matches = exact or prefix
+                if matches:
+                    found[canonical] = matches[0]
+                    break
+
+        if "third_release" in found:
+            score += 10.0
+        if "second_release" in found:
+            score += 6.0
+        if "first_release" in found:
+            score += 6.0
+        if "latest" in found:
+            score += 4.0
+
+        score += 2.0 * float(period_col in {"date", "quarter"})
+        score -= 0.25 * float(header)
 
         if score > best_score:
-            best = df
             best_score = score
+            best_df = df
+            best_period_col = period_col
 
-    if best is None:
+    if best_df is None or best_period_col is None:
         raise ValueError(f"Could not detect a release truth table in workbook: {path}")
 
-    period_col = _find_period_column(best)
-    assert period_col is not None
     out = pd.DataFrame()
-    out["quarter"] = best[period_col].map(lambda x: parse_periodish(x, freq_hint="Q"))
-    for candidate_name, canonical_name in [
-        ("first", "first_release"),
-        ("second", "second_release"),
-        ("third", "third_release"),
-        ("latest", "latest"),
-        ("mean", "mean"),
-        ("median", "median"),
-        ("gdpplus", "gdpplus"),
-    ]:
-        matches = [c for c in best.columns if candidate_name in str(c).lower()]
+    out["quarter"] = best_df[best_period_col].map(lambda x: parse_periodish(x, freq_hint="Q"))
+    for canonical, aliases in alias_map.items():
+        if canonical == "quarter":
+            continue
+        matches = [c for c in best_df.columns if any(c == alias or c.startswith(alias) for alias in aliases)]
         if matches:
-            out[canonical_name] = pd.to_numeric(best[matches[0]], errors="coerce")
+            out[canonical] = pd.to_numeric(best_df[matches[0]], errors="coerce")
 
+    value_cols = [c for c in out.columns if c != "quarter"]
+    out = out.dropna(subset=["quarter"])
+    if value_cols:
+        out = out.dropna(subset=value_cols, how="all")
+    return out.reset_index(drop=True)
+
+
+def load_gdpplus_latest_table(path: Path, value_label: str = "gdpplus") -> pd.DataFrame:
+    """
+    Parse GDPplus_Vintages.xlsx, which is a wide quarter-by-vintage matrix with
+    release headers such as GDPPLUS_082913.
+    """
+    matrix_info = extract_best_period_matrix(path, required_col_freq="Q")
+    matrix = matrix_info["matrix"].copy()
+    row_freq = matrix_info["row_freq"]
+    col_freq = matrix_info["col_freq"]
+
+    if row_freq == "Q":
+        quarter_index = pd.PeriodIndex(matrix.index, freq="Q")
+        raw_release_labels = matrix_info.get("kept_raw_col_labels", list(matrix.columns))
+        value_df = pd.DataFrame(matrix.to_numpy(), index=quarter_index, columns=range(matrix.shape[1]))
+    elif col_freq == "Q":
+        quarter_index = pd.PeriodIndex(matrix.columns, freq="Q")
+        raw_release_labels = matrix_info.get("kept_raw_row_labels", list(matrix.index))
+        value_df = pd.DataFrame(matrix.T.to_numpy(), index=quarter_index, columns=range(matrix.shape[0]))
+    else:
+        raise ValueError(f"Could not orient GDPplus matrix in workbook: {path}")
+
+    release_dates: List[pd.Timestamp] = []
+    for raw in raw_release_labels:
+        ts = _parse_gdpplus_release_timestamp(str(raw))
+        if ts is None:
+            p = parse_periodish(raw, freq_hint="M")
+            ts = p.to_timestamp() if p is not None else pd.NaT
+        release_dates.append(ts)
+
+    value_df.columns = release_dates
+    long = (
+        value_df.stack(dropna=False)
+        .rename(value_label)
+        .rename_axis(index=["quarter", "release_date"])
+        .reset_index()
+    )
+    long = long.dropna(subset=["quarter"])
+    long["release_date"] = pd.to_datetime(long["release_date"], errors="coerce")
+    long = long.dropna(subset=["release_date"])
+    long = long.dropna(subset=[value_label])
+    long = long.sort_values(["quarter", "release_date"]).reset_index(drop=True)
+    latest = long.groupby("quarter", as_index=False).tail(1).reset_index(drop=True)
+    latest["latest_release_period"] = latest["release_date"].dt.to_period("M")
+    return latest[["quarter", value_label, "release_date", "latest_release_period"]]
+
+
+def load_spf_growth_benchmark(path: Path, value_label: str) -> pd.DataFrame:
+    """
+    Parse MeanGrowth.xlsx / MedianGrowth.xlsx using the RGDP worksheet.
+
+    The relevant sheet stores survey-quarter identifiers in YEAR and QUARTER and
+    the current-quarter real GDP growth benchmark in the left-most drgdp* column
+    (for the current files this is typically drgdp2).
+    """
+    xl = pd.ExcelFile(path)
+    sheet_candidates = [s for s in xl.sheet_names if str(s).strip().upper() == "RGDP"]
+    if not sheet_candidates:
+        sheet_candidates = [s for s in xl.sheet_names if "RGDP" in str(s).upper()]
+    if not sheet_candidates:
+        raise ValueError(f"Could not find an RGDP sheet in workbook: {path}")
+
+    sheet = sheet_candidates[0]
+    df = pd.read_excel(path, sheet_name=sheet)
+    df.columns = [normalize_column_name(c).lower() for c in df.columns]
+
+    year_col = next((c for c in df.columns if c == "year"), None)
+    quarter_col = next((c for c in df.columns if c == "quarter"), None)
+    if year_col is None or quarter_col is None:
+        raise ValueError(f"RGDP sheet in {path} does not expose YEAR / QUARTER columns.")
+
+    growth_cols = [c for c in df.columns if re.match(r"^d?rgdp\d+$", c)]
+    if not growth_cols:
+        raise ValueError(f"RGDP sheet in {path} does not expose drgdp* growth columns.")
+
+    def _growth_suffix(col: str) -> int:
+        match = re.search(r"(\d+)$", col)
+        return int(match.group(1)) if match else 10**6
+
+    current_horizon_col = sorted(growth_cols, key=_growth_suffix)[0]
+
+    out = pd.DataFrame()
+    out["quarter"] = [
+        pd.Period(f"{int(y):04d}Q{int(q)}", freq="Q")
+        if pd.notna(y) and pd.notna(q) and int(q) in {1, 2, 3, 4}
+        else pd.NaT
+        for y, q in zip(df[year_col], df[quarter_col])
+    ]
+    out[value_label] = pd.to_numeric(df[current_horizon_col], errors="coerce")
+    out["source_sheet"] = sheet
+    out["horizon_col"] = current_horizon_col
     out = out.dropna(subset=["quarter"]).reset_index(drop=True)
     return out
 
 
 def load_simple_quarter_value_table(path: Path, value_label: str) -> pd.DataFrame:
     """
-    Parse a workbook that contains quarter + value information (e.g. GDPplus,
-    meanGrowth, medianGrowth) with heuristic header detection.
+    Parse quarter/value workbooks with file-specific logic where needed.
     """
+    name = path.name.lower()
+    if "gdpplus" in name:
+        return load_gdpplus_latest_table(path, value_label=value_label)
+
+    if "meangrowth" in name or "mediangrowth" in name:
+        return load_spf_growth_benchmark(path, value_label=value_label)
+
     best: Optional[pd.DataFrame] = None
+    best_period_col: Optional[str] = None
     best_score = -1.0
 
     for _, _, df in _candidate_excel_tables(path):
@@ -965,27 +1203,26 @@ def load_simple_quarter_value_table(path: Path, value_label: str) -> pd.DataFram
         if period_col is None:
             continue
         num_cols = [c for c in df.columns if c != period_col and pd.to_numeric(df[c], errors="coerce").notna().mean() > 0.5]
-        score = len(num_cols)
-        if score > best_score and num_cols:
+        if not num_cols:
+            continue
+        score = float(len(num_cols))
+        if score > best_score:
             best = df[[period_col] + num_cols].copy()
+            best_period_col = period_col
             best_score = score
 
-    if best is None:
+    if best is None or best_period_col is None:
         raise ValueError(f"Could not parse quarter/value table from workbook: {path}")
 
-    period_col = _find_period_column(best)
-    assert period_col is not None
-    num_cols = [c for c in best.columns if c != period_col]
+    num_cols = [c for c in best.columns if c != best_period_col]
     value_col = num_cols[0]
-
     out = pd.DataFrame(
         {
-            "quarter": best[period_col].map(lambda x: parse_periodish(x, freq_hint="Q")),
+            "quarter": best[best_period_col].map(lambda x: parse_periodish(x, freq_hint="Q")),
             value_label: pd.to_numeric(best[value_col], errors="coerce"),
         }
     )
     return out.dropna(subset=["quarter"]).reset_index(drop=True)
-
 
 # --------------------------------------------------------------------------------------
 # Target / truth construction
@@ -1001,21 +1238,33 @@ def select_target_workbooks(repo_root: Path) -> Dict[str, Path]:
     return mapping
 
 
+
 def build_target_and_truth_objects(repo_root: Path) -> Dict[str, pd.DataFrame]:
     workbooks = select_target_workbooks(repo_root)
     if "routputMvQd.xlsx" not in workbooks and "ROUTPUTQvQd.xlsx" not in workbooks:
         raise FileNotFoundError("Could not find ROUTPUT workbook in data/raw.")
 
-    routput_path = workbooks.get("routputMvQd.xlsx", workbooks.get("ROUTPUTQvQd.xlsx"))
-    assert routput_path is not None
+    target_vintage: Optional[pd.DataFrame] = None
+    last_target_error: Optional[Exception] = None
+    for candidate_name in ["routputMvQd.xlsx", "ROUTPUTQvQd.xlsx"]:
+        candidate_path = workbooks.get(candidate_name)
+        if candidate_path is None:
+            continue
+        try:
+            target_vintage = load_routput_vintage_history(candidate_path)
+            break
+        except Exception as err:
+            last_target_error = err
 
-    target_vintage = load_routput_vintage_history(routput_path)
+    if target_vintage is None:
+        if last_target_error is not None:
+            raise last_target_error
+        raise ValueError("Could not parse any ROUTPUT workbook in data/raw.")
 
     truth_objects: Dict[str, pd.DataFrame] = {
         "target_vintage_table": target_vintage
     }
 
-    # Latest RTDSM truth can always be constructed from vintage history.
     truth_latest = (
         target_vintage.dropna(subset=["gdp_growth_annualized"])
         .sort_values(["obs_period", "vintage_period"])
@@ -1039,18 +1288,17 @@ def build_target_and_truth_objects(repo_root: Path) -> Dict[str, pd.DataFrame]:
 
     gdpplus_path = workbooks.get("GDPplus_Vintages.xlsx")
     if gdpplus_path is not None:
-        truth_objects["truth_gdpplus"] = load_simple_quarter_value_table(gdpplus_path, "gdpplus")
+        truth_objects["truth_gdpplus"] = load_gdpplus_latest_table(gdpplus_path, "gdpplus")
 
     mean_path = workbooks.get("meanGrowth.xlsx")
     if mean_path is not None:
-        truth_objects["spf_mean"] = load_simple_quarter_value_table(mean_path, "spf_mean")
+        truth_objects["spf_mean"] = load_spf_growth_benchmark(mean_path, "spf_mean")
 
     median_path = workbooks.get("medianGrowth.xlsx")
     if median_path is not None:
-        truth_objects["spf_median"] = load_simple_quarter_value_table(median_path, "spf_median")
+        truth_objects["spf_median"] = load_spf_growth_benchmark(median_path, "spf_median")
 
     return truth_objects
-
 
 def quarter_of_vintage(vintage_period: pd.Period) -> pd.Period:
     return vintage_period.asfreq("Q")
@@ -1171,16 +1419,92 @@ def build_observed_months_by_series(panel: pd.DataFrame, target_quarter: pd.Peri
     return out
 
 
+
 def as_model_index(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Convert PeriodIndex inputs to first-day Timestamp indexes for statsmodels,
-    while preserving first-of-period semantics and avoiding artificial
-    month-end conversion.
+    Canonicalize model inputs to monthly / quarterly PeriodIndex objects.
+
+    DynamicFactorMQ works cleanly with PeriodIndex, and this preserves the
+    repository's first-day-of-month / first-day-of-quarter semantics without
+    inventing month-end timestamps.
     """
     out = df.copy()
-    if isinstance(out.index, pd.PeriodIndex):
-        out.index = out.index.to_timestamp()
-    return out.sort_index()
+    idx = out.index
+
+    if isinstance(idx, pd.PeriodIndex):
+        return out.sort_index()
+
+    if isinstance(idx, pd.DatetimeIndex):
+        freqstr = getattr(idx, "freqstr", None) or pd.infer_freq(idx)
+        if freqstr is None:
+            raise ValueError(
+                "Model inputs must have an inferable monthly or quarterly calendar. "
+                "Got a DatetimeIndex with no fixed/inferable frequency."
+            )
+        freqstr = str(freqstr).upper()
+        if freqstr.startswith("M"):
+            out.index = idx.to_period("M")
+        elif freqstr.startswith("Q"):
+            out.index = idx.to_period("Q")
+        else:
+            raise ValueError(
+                f"Model inputs must be monthly or quarterly. Got inferred frequency {freqstr!r}."
+            )
+        return out.sort_index()
+
+    inferred = infer_period_frequency_from_values(list(idx))
+    if inferred in {"M", "Q"}:
+        parsed = [parse_periodish(v, freq_hint=inferred) for v in idx]
+        if all(v is not None for v in parsed):
+            out.index = pd.PeriodIndex(parsed, freq=inferred)
+            return out.sort_index()
+
+    raise TypeError(
+        f"Model inputs must be indexed by PeriodIndex or DatetimeIndex. Got {type(idx).__name__}."
+    )
+
+def _coerce_impact_date_for_model_index(index: pd.Index, target_quarter: pd.Period):
+    """
+    Map the quarter-end impact month to the actual label type used by the
+    statsmodels comparison dataset.
+
+    The model should think in monthly periods for the mixed-frequency news
+    decomposition. We therefore keep `2026-03` as the period label when the
+    model index is PeriodIndex, and only convert to timestamps when the model
+    is actually indexed by timestamps.
+    """
+    impact_month = get_quarter_end_month(target_quarter)
+    if isinstance(index, pd.PeriodIndex):
+        return impact_month.asfreq(index.freq)
+    if isinstance(index, pd.DatetimeIndex):
+        freqstr = str(getattr(index, "freqstr", "") or "")
+        if freqstr.startswith("M") and not freqstr.startswith("MS"):
+            return impact_month.to_timestamp(how="end")
+        return impact_month.to_timestamp(how="start")
+    raise TypeError(
+        "News comparison index must be a PeriodIndex or DatetimeIndex; "
+        f"got {type(index).__name__}."
+    )
+
+
+def _assert_news_impact_date_supported(index: pd.Index, impact_date, *, vintage: pd.Period, target_quarter: pd.Period) -> None:
+    """
+    Fail fast with a clear message if statsmodels will not be able to locate or
+    extend the requested impact date on the comparison index.
+    """
+    from statsmodels.tsa.base.tsa_model import get_index_loc
+
+    try:
+        get_index_loc(impact_date, index)
+    except Exception as exc:
+        min_idx = index.min() if len(index) else None
+        max_idx = index.max() if len(index) else None
+        freqstr = getattr(index, "freqstr", None)
+        raise ValueError(
+            "News impact date is incompatible with the comparison model index. "
+            f"vintage={vintage}, target_quarter={target_quarter}, impact_date={impact_date}, "
+            f"index_type={type(index).__name__}, freq={freqstr}, min_index={min_idx}, max_index={max_idx}."
+        ) from exc
 
 
 # --------------------------------------------------------------------------------------
@@ -1436,6 +1760,7 @@ def export_table(df: pd.DataFrame, path: Path) -> None:
         raise ValueError(f"Unsupported export path: {path}")
 
 
+
 def run_layer1_dfm(config: ProtocolConfig) -> Dict[str, pd.DataFrame]:
     repo_root = Path(config.repo_root)
     output_dir = ensure_directory(Path(config.output_dir))
@@ -1453,8 +1778,11 @@ def run_layer1_dfm(config: ProtocolConfig) -> Dict[str, pd.DataFrame]:
         vintage_limit=config.vintage_limit,
     )
 
+    target_vintage_set = set(target_vintage_table["vintage_period"].dropna().tolist())
+    vintage_schedule = [v for v in vintage_schedule if v in target_vintage_set]
+
     if len(vintage_schedule) == 0:
-        raise ValueError("No eligible monthly vintages found for the selected benchmark window.")
+        raise ValueError("No eligible monthly vintages found for the selected benchmark window after capping to available target vintages.")
 
     nowcast_rows: List[Dict[str, Any]] = []
     state_rows: List[pd.DataFrame] = []
@@ -1468,6 +1796,9 @@ def run_layer1_dfm(config: ProtocolConfig) -> Dict[str, pd.DataFrame]:
     prev_vintage = None
 
     for vintage in vintage_schedule:
+        if not isinstance(vintage, pd.Period) or not str(vintage.freqstr).startswith("M"):
+            raise ValueError(f"Vintage schedule must be monthly Periods. Got {vintage!r}.")
+
         md_row = md_manifest.loc[md_manifest["vintage_period"] == vintage]
         if md_row.empty:
             continue
@@ -1477,15 +1808,15 @@ def run_layer1_dfm(config: ProtocolConfig) -> Dict[str, pd.DataFrame]:
         transformed = apply_tcodes_to_snapshot(snapshot)
         monthly_panel, panel_meta = select_monthly_panel(transformed, panel_mode=config.panel_mode)
 
-        # Drop all-missing columns and enforce a minimal data requirement.
         enough_data = monthly_panel.notna().sum() >= int(config.min_monthly_obs)
         monthly_panel = monthly_panel.loc[:, enough_data].copy()
         panel_meta = panel_meta[panel_meta["mnemonic"].isin(monthly_panel.columns)].copy().reset_index(drop=True)
 
         quarterly_target = build_quarterly_target_series_for_vintage(target_vintage_table, vintage)
-
-        # Ensure benchmark quarter exists in current target history window.
         target_quarter = quarter_of_vintage(vintage)
+
+        if not isinstance(target_quarter, pd.Period) or not str(target_quarter.freqstr).startswith("Q"):
+            raise ValueError(f"Target quarter must be quarterly Period. Got {target_quarter!r}.")
 
         if monthly_panel.shape[1] == 0 or monthly_panel.shape[0] == 0:
             diagnostics_rows.append(
@@ -1507,7 +1838,14 @@ def run_layer1_dfm(config: ProtocolConfig) -> Dict[str, pd.DataFrame]:
             )
             continue
 
-        # Choose factor order.
+        monthly_panel = as_model_index(monthly_panel)
+        quarterly_target = as_model_index(quarterly_target)
+
+        if not isinstance(monthly_panel.index, pd.PeriodIndex) or not str(monthly_panel.index.freqstr).startswith("M"):
+            raise ValueError(f"Monthly panel must have a monthly PeriodIndex. Got {type(monthly_panel.index).__name__} / {getattr(monthly_panel.index, 'freqstr', None)!r}.")
+        if not isinstance(quarterly_target.index, pd.PeriodIndex) or not str(quarterly_target.index.freqstr).startswith("Q"):
+            raise ValueError(f"Quarterly target must have a quarterly PeriodIndex. Got {type(quarterly_target.index).__name__} / {getattr(quarterly_target.index, 'freqstr', None)!r}.")
+
         if config.select_factor_order_per_vintage:
             factors, _ = build_factor_mapping(monthly_panel.columns, panel_meta, quarterly_target_name="gdp_growth")
             factor_order = select_factor_order(
@@ -1540,7 +1878,6 @@ def run_layer1_dfm(config: ProtocolConfig) -> Dict[str, pd.DataFrame]:
             quarterly_target_name="gdp_growth",
         )
 
-        # Coverage and observed-month audit
         coverage = compute_block_coverage(monthly_panel, panel_meta, target_quarter)
         coverage["vintage_period"] = vintage
         coverage["target_quarter"] = target_quarter
@@ -1548,7 +1885,6 @@ def run_layer1_dfm(config: ProtocolConfig) -> Dict[str, pd.DataFrame]:
 
         observed_months = build_observed_months_by_series(monthly_panel, target_quarter)
 
-        # Oriented current and lagged factor states
         factors_smoothed = oriented_factor_states(results, panel_meta, kind="smoothed")
         current_state = factors_smoothed.loc[[factors_smoothed.index.max()]].copy()
         current_state["vintage_period"] = vintage
@@ -1556,7 +1892,7 @@ def run_layer1_dfm(config: ProtocolConfig) -> Dict[str, pd.DataFrame]:
         current_state["state_kind"] = "current_smoothed"
         state_rows.append(current_state.reset_index().rename(columns={"index": "state_period"}))
 
-        if prev_results is not None:
+        if prev_results is not None and prev_vintage is not None:
             prev_factors_smoothed = oriented_factor_states(prev_results, panel_meta, kind="smoothed")
             prev_state = prev_factors_smoothed.loc[[prev_factors_smoothed.index.max()]].copy()
             prev_state["vintage_period"] = vintage
@@ -1564,17 +1900,28 @@ def run_layer1_dfm(config: ProtocolConfig) -> Dict[str, pd.DataFrame]:
             prev_state["state_kind"] = "previous_vintage_smoothed"
             state_rows.append(prev_state.reset_index().rename(columns={"index": "state_period"}))
 
-            # News decomposition uses previous vintage parameters and updated current-vintage data.
-            # Align the current monthly panel to the variable ordering used by the previous model;
-            # newly absent series remain explicit NaN rather than being dropped.
             prev_monthly_names = list(prev_results.model.endog_names[: prev_results.model.k_endog_M])
             comparison_monthly = monthly_panel.reindex(columns=prev_monthly_names)
+            comparison_monthly_model = as_model_index(comparison_monthly)
+            quarterly_target_model = as_model_index(quarterly_target[["gdp_growth"]])
+
+            impact_date = _coerce_impact_date_for_model_index(
+                comparison_monthly_model.index,
+                target_quarter,
+            )
+            _assert_news_impact_date_supported(
+                comparison_monthly_model.index,
+                impact_date,
+                vintage=vintage,
+                target_quarter=target_quarter,
+            )
+
             news = prev_results.news(
-                as_model_index(comparison_monthly),
+                comparison_monthly_model,
                 comparison_type="updated",
-                impact_date=get_quarter_end_month(target_quarter),
+                impact_date=impact_date,
                 impacted_variable="gdp_growth",
-                endog_quarterly=as_model_index(quarterly_target[["gdp_growth"]]),
+                endog_quarterly=quarterly_target_model,
                 original_scale=True,
             )
             news_series, news_blocks = flatten_news_results(news, panel_meta, impacted_variable="gdp_growth")
@@ -1585,7 +1932,6 @@ def run_layer1_dfm(config: ProtocolConfig) -> Dict[str, pd.DataFrame]:
             news_series_rows.append(news_series)
             news_block_rows.append(news_blocks)
         else:
-            # Seed empty tables for the first vintage.
             news_series_rows.append(pd.DataFrame({"vintage_period": [vintage], "target_quarter": [target_quarter]}))
             news_block_rows.append(pd.DataFrame({"vintage_period": [vintage], "target_quarter": [target_quarter]}))
 
@@ -1641,7 +1987,6 @@ def run_layer1_dfm(config: ProtocolConfig) -> Dict[str, pd.DataFrame]:
     coverage_df = pd.concat(coverage_rows, ignore_index=True) if coverage_rows else pd.DataFrame()
     diagnostics_df = pd.DataFrame(diagnostics_rows)
 
-    # Merge truths that are already available as Layer 1 support objects.
     if "truth_third_release" in target_objects and "target_quarter" in nowcasts_df.columns:
         nowcasts_df = nowcasts_df.merge(
             target_objects["truth_third_release"],
@@ -1662,20 +2007,18 @@ def run_layer1_dfm(config: ProtocolConfig) -> Dict[str, pd.DataFrame]:
 
     if "truth_gdpplus" in target_objects and "target_quarter" in nowcasts_df.columns:
         nowcasts_df = nowcasts_df.merge(
-            target_objects["truth_gdpplus"],
+            target_objects["truth_gdpplus"][["quarter", "gdpplus"]],
             left_on="target_quarter",
             right_on="quarter",
             how="left",
         ).drop(columns=["quarter"])
         nowcasts_df["dfm_residual_gdpplus"] = nowcasts_df["gdpplus"] - nowcasts_df["dfm_nowcast"]
 
-    # Layer 2 lag features, same within-quarter origin only when truth is available.
     if "dfm_residual_third_release" in nowcasts_df.columns and len(nowcasts_df):
         nowcasts_df = nowcasts_df.sort_values(["within_quarter_origin", "target_quarter", "vintage_period"]).reset_index(drop=True)
         nowcasts_df["residual_lag1_same_tau"] = nowcasts_df.groupby("within_quarter_origin")["dfm_residual_third_release"].shift(1)
         nowcasts_df["residual_lag2_same_tau"] = nowcasts_df.groupby("within_quarter_origin")["dfm_residual_third_release"].shift(2)
 
-    # Export
     serialize_protocol(config, output_dir / "layer1_protocol.json")
     export_table(nowcasts_df, output_dir / "dfm_nowcasts.csv")
     if not states_df.empty:
@@ -1703,7 +2046,6 @@ def run_layer1_dfm(config: ProtocolConfig) -> Dict[str, pd.DataFrame]:
         "diagnostics": diagnostics_df,
         **target_objects,
     }
-
 
 # --------------------------------------------------------------------------------------
 # Presentation helpers for the notebook
@@ -1739,689 +2081,3 @@ def completion_checklist_frame(output_dir: Path) -> pd.DataFrame:
             }
         )
     return pd.DataFrame(rows)
-
-
-# --------------------------------------------------------------------------------------
-# Repository-specific parser overrides (patched after direct inspection of RTDSM / GDPplus / SPF layouts)
-# --------------------------------------------------------------------------------------
-
-_RTDSM_NUMERIC_QUARTER_PATTERN = re.compile(r"^\s*(?P<y>\d{4})\s*:\s*(?P<q>0?[1-4])\s*$")
-_RTDSM_MONTH_VINTAGE_PATTERN = re.compile(r"^\s*[A-Za-z_]+(?P<yy>\d{2})M(?P<m>\d{1,2})\s*$", re.IGNORECASE)
-_RTDSM_QUARTER_VINTAGE_PATTERN = re.compile(r"^\s*[A-Za-z_]+(?P<yy>\d{2})Q(?P<q>[1-4])\s*$", re.IGNORECASE)
-_GDPPLUS_RELEASE_PATTERN = re.compile(r"^\s*GDPPLUS[_-]?(?P<mm>\d{2})(?P<dd>\d{2})(?P<yy>\d{2})\s*$", re.IGNORECASE)
-
-
-def _coerce_two_digit_year(yy: int) -> int:
-    yy = int(yy)
-    return 1900 + yy if yy >= 50 else 2000 + yy
-
-
-def _parse_rtdsm_vintage_period(value: Any) -> Optional[pd.Period]:
-    if value is None:
-        return None
-    text = str(value).strip()
-    if not text:
-        return None
-
-    match = _RTDSM_MONTH_VINTAGE_PATTERN.match(text)
-    if match:
-        y = _coerce_two_digit_year(match.group('yy'))
-        m = int(match.group('m'))
-        if 1 <= m <= 12:
-            return pd.Period(f"{y:04d}-{m:02d}", freq='M')
-
-    match = _RTDSM_QUARTER_VINTAGE_PATTERN.match(text)
-    if match:
-        y = _coerce_two_digit_year(match.group('yy'))
-        q = int(match.group('q'))
-        if 1 <= q <= 4:
-            return pd.Period(f"{y}Q{q}", freq='Q')
-
-    return None
-
-
-def parse_gdpplus_release_timestamp(value: Any) -> Optional[pd.Timestamp]:
-    if value is None:
-        return None
-    if isinstance(value, float) and math.isnan(value):
-        return None
-    if isinstance(value, pd.Timestamp):
-        return pd.Timestamp(value)
-
-    text = str(value).strip()
-    if not text:
-        return None
-
-    match = _GDPPLUS_RELEASE_PATTERN.match(text)
-    if match:
-        y = _coerce_two_digit_year(match.group('yy'))
-        m = int(match.group('mm'))
-        d = int(match.group('dd'))
-        try:
-            return pd.Timestamp(year=y, month=m, day=d)
-        except Exception:
-            return None
-
-    try:
-        return pd.Timestamp(pd.to_datetime(text, errors='raise'))
-    except Exception:
-        return None
-
-
-def parse_periodish(value: Any, freq_hint: Optional[str] = None) -> Optional[pd.Period]:
-    """
-    Parse month-like or quarter-like values to a pandas Period without shifting
-    to month-end. The parser is conservative about first-of-period timestamps:
-    a literal date like ``2026-01-01`` is treated as *January 2026* unless the
-    caller explicitly requests quarterly semantics or the label itself encodes a
-    quarter (e.g. ``1947:Q1`` or RTDSM-style ``2013:01`` inside GDP/GDPplus
-    workbooks).
-    """
-    if value is None:
-        return None
-    if isinstance(value, float) and math.isnan(value):
-        return None
-    if isinstance(value, pd.Period):
-        return value
-    if isinstance(value, pd.Timestamp):
-        if freq_hint == 'Q':
-            return value.to_period('Q')
-        return value.to_period('M')
-
-    text = str(value).strip()
-    if text == '':
-        return None
-
-    # Explicit quarter encodings used in RTDSM / workbook text.
-    for pattern in _QUARTER_PATTERNS:
-        match = pattern.match(text)
-        if match:
-            y = int(match.group('y'))
-            q = int(match.group('q'))
-            return pd.Period(f"{y}Q{q}", freq='Q')
-
-    match = _RTDSM_NUMERIC_QUARTER_PATTERN.match(text)
-    if match:
-        y = int(match.group('y'))
-        q = int(match.group('q'))
-        if 1 <= q <= 4:
-            return pd.Period(f"{y}Q{q}", freq='Q')
-
-    # RTDSM vintage headers such as ROUTPUT65M11 / ROUTPUT65Q4.
-    vintage_period = _parse_rtdsm_vintage_period(text)
-    if vintage_period is not None:
-        return vintage_period
-
-    # Handle "YYYYmMM" labels in FRED-QD / FRED-MD filenames and metadata.
-    match = re.match(r"^\s*(?P<y>\d{4})[mM](?P<m>\d{2})\s*$", text)
-    if match:
-        return pd.Period(f"{int(match.group('y')):04d}-{int(match.group('m')):02d}", freq='M')
-
-    # Full timestamps or first-day period markers from the repository. Default to
-    # month semantics unless the caller explicitly asks for quarterly semantics.
-    try:
-        ts = pd.to_datetime(text, errors='raise')
-        if freq_hint == 'Q':
-            return ts.to_period('Q')
-        return ts.to_period('M')
-    except Exception:
-        return None
-
-
-def infer_period_frequency_from_values(values: Sequence[Any]) -> Optional[str]:
-    """
-    Infer whether a sequence is monthly or quarterly while respecting the
-    repository's first-day-of-period convention.
-
-    Crucially, the function does **not** infer quarterly frequency merely because
-    a date happens to fall on January 1 / April 1 / July 1 / October 1. Quarterly
-    status must come from either explicit quarter labels or the sequence pattern
-    itself.
-    """
-    explicit_quarter_hits = 0
-    explicit_month_hits = 0
-    ordinals: List[int] = []
-
-    for value in values:
-        if value is None or (isinstance(value, float) and math.isnan(value)):
-            continue
-        text = str(value).strip()
-        if text == '':
-            continue
-
-        if any(pattern.match(text) for pattern in _QUARTER_PATTERNS) or _RTDSM_NUMERIC_QUARTER_PATTERN.match(text):
-            explicit_quarter_hits += 1
-            p = parse_periodish(text, freq_hint='Q')
-            if p is not None:
-                ts = p.to_timestamp()
-                ordinals.append(ts.year * 12 + ts.month)
-            continue
-
-        p_vintage = _parse_rtdsm_vintage_period(text)
-        if p_vintage is not None:
-            if p_vintage.freqstr.upper().startswith('Q'):
-                explicit_quarter_hits += 1
-            else:
-                explicit_month_hits += 1
-            ts = p_vintage.to_timestamp()
-            ordinals.append(ts.year * 12 + ts.month)
-            continue
-
-        try:
-            ts = pd.Timestamp(pd.to_datetime(value, errors='raise'))
-            ordinals.append(ts.year * 12 + ts.month)
-        except Exception:
-            continue
-
-    if explicit_quarter_hits and explicit_quarter_hits >= max(3, explicit_month_hits):
-        return 'Q'
-    if explicit_month_hits and explicit_month_hits >= max(3, explicit_quarter_hits):
-        return 'M'
-    if not ordinals:
-        return None
-
-    ord_arr = np.unique(np.sort(np.asarray(ordinals, dtype=int)))
-    if len(ord_arr) >= 2:
-        diffs = np.diff(ord_arr)
-        month_set = set((ord_arr - 1) % 12 + 1)
-        quarter_like_month_sets = ({1, 4, 7, 10}, {3, 6, 9, 12})
-        if len(diffs) > 0:
-            if np.mean(diffs == 3) > 0.8 and any(month_set.issubset(s) for s in quarter_like_month_sets):
-                return 'Q'
-            if np.mean(diffs == 1) > 0.8:
-                return 'M'
-
-    months = {(o - 1) % 12 + 1 for o in ord_arr}
-    if any(months.issubset(s) for s in ({1, 4, 7, 10}, {3, 6, 9, 12})) and len(ord_arr) >= 4:
-        return 'Q'
-    return 'M'
-
-
-def _candidate_excel_tables(path: Path) -> Iterator[Tuple[str, int, pd.DataFrame]]:
-    xl = pd.ExcelFile(path)
-    for sheet in xl.sheet_names:
-        for header in range(0, 12):
-            try:
-                df = pd.read_excel(path, sheet_name=sheet, header=header)
-            except Exception:
-                continue
-            if df is None or df.empty:
-                continue
-            df = df.copy()
-            df.columns = [normalize_column_name(c).lower() for c in df.columns]
-            yield sheet, header, df
-
-
-def _find_period_column(df: pd.DataFrame) -> Optional[str]:
-    best_col = None
-    best_score = 0.0
-    for col in df.columns:
-        score = df[col].map(lambda x: parse_periodish(x, freq_hint='Q') is not None).mean()
-        if score > best_score:
-            best_score = float(score)
-            best_col = col
-    return best_col if best_score > 0.4 else None
-
-
-def _find_year_quarter_columns(df: pd.DataFrame) -> Tuple[Optional[str], Optional[str]]:
-    year_col = None
-    quarter_col = None
-    for col in df.columns:
-        low = str(col).lower()
-        if year_col is None and low == 'year':
-            year_col = col
-        if quarter_col is None and low == 'quarter':
-            quarter_col = col
-    if year_col is None:
-        year_matches = [c for c in df.columns if str(c).lower().endswith('year') or str(c).lower() == 'year']
-        year_col = year_matches[0] if year_matches else None
-    if quarter_col is None:
-        quarter_matches = [c for c in df.columns if str(c).lower().endswith('quarter') or str(c).lower() == 'quarter']
-        quarter_col = quarter_matches[0] if quarter_matches else None
-    return year_col, quarter_col
-
-
-def _period_from_year_quarter_columns(df: pd.DataFrame) -> Optional[pd.Series]:
-    year_col, quarter_col = _find_year_quarter_columns(df)
-    if year_col is None or quarter_col is None:
-        return None
-    year_vals = pd.to_numeric(df[year_col], errors='coerce')
-    quarter_vals = pd.to_numeric(df[quarter_col], errors='coerce')
-    valid = year_vals.notna() & quarter_vals.isin([1, 2, 3, 4])
-    if valid.mean() <= 0.5:
-        return None
-    out = pd.Series([None] * len(df), index=df.index, dtype='object')
-    for idx in df.index[valid]:
-        out.loc[idx] = pd.Period(f"{int(year_vals.loc[idx])}Q{int(quarter_vals.loc[idx])}", freq='Q')
-    return out
-
-
-def extract_best_period_matrix(path: Path, required_col_freq: Optional[str] = None) -> Dict[str, Any]:
-    """
-    Search workbook sheets for a vintage-by-observation matrix where one axis is
-    an observation-period axis and the other is a vintage-period axis. This is
-    used for RTDSM-style ROUTPUT workbooks.
-    """
-    wb = load_workbook(path, read_only=True, data_only=True)
-    candidates: List[Dict[str, Any]] = []
-
-    for sheet_name in wb.sheetnames:
-        values = _read_sheet_as_values(path, sheet_name)
-        values = _trim_2d(values)
-        if not values:
-            continue
-
-        n_rows = len(values)
-        n_cols = max(len(r) for r in values)
-        for header_row in range(min(12, n_rows)):
-            for index_col in range(min(5, n_cols)):
-                cand = _score_matrix_candidate(values, header_row, index_col)
-                if cand['score'] < 0:
-                    continue
-                cand['sheet_name'] = sheet_name
-                cand['values'] = values
-                if required_col_freq is not None and cand.get('row_freq') != required_col_freq and cand.get('col_freq') != required_col_freq:
-                    continue
-                candidates.append(cand)
-
-    if not candidates:
-        raise ValueError(f"Could not find a date-like matrix in workbook: {path}")
-
-    def ranking_key(c: Dict[str, Any]) -> Tuple[int, int, float]:
-        has_required = int(c.get('row_freq') == required_col_freq or c.get('col_freq') == required_col_freq)
-        has_monthly_vintage_axis = int(c.get('row_freq') == 'M' or c.get('col_freq') == 'M')
-        return (has_required, has_monthly_vintage_axis, float(c['score']))
-
-    best = sorted(candidates, key=ranking_key, reverse=True)[0]
-    values = best['values']
-    header_row = int(best['header_row'])
-    index_col = int(best['index_col'])
-
-    raw_col_labels = values[header_row][index_col + 1:]
-    raw_row_labels = [values[i][index_col] if index_col < len(values[i]) else None for i in range(header_row + 1, len(values))]
-    row_freq = infer_period_frequency_from_values(raw_row_labels)
-    col_freq = infer_period_frequency_from_values(raw_col_labels)
-    row_periods = [parse_periodish(v, freq_hint=row_freq) for v in raw_row_labels]
-    col_periods = [parse_periodish(v, freq_hint=col_freq) for v in raw_col_labels]
-
-    body = []
-    for i in range(header_row + 1, len(values)):
-        row = values[i] + [None] * (len(raw_col_labels) + index_col + 1 - len(values[i]))
-        body.append([pd.to_numeric(x, errors='coerce') for x in row[index_col + 1:index_col + 1 + len(raw_col_labels)]])
-    matrix = pd.DataFrame(body, index=row_periods, columns=col_periods)
-    matrix = matrix.dropna(how='all').dropna(axis=1, how='all')
-
-    return {
-        'sheet_name': best['sheet_name'],
-        'header_row': header_row,
-        'index_col': index_col,
-        'row_freq': row_freq,
-        'col_freq': col_freq,
-        'matrix': matrix,
-        'raw_row_labels': raw_row_labels,
-        'raw_col_labels': raw_col_labels,
-    }
-
-
-def load_routput_vintage_history(path: Path) -> pd.DataFrame:
-    matrix_info = extract_best_period_matrix(path, required_col_freq='Q')
-    long = melt_vintage_matrix(matrix_info, value_name='level')
-    long = long[long['obs_freq'] == 'Q'].copy()
-    long = long.dropna(subset=['vintage_period', 'obs_period'])
-    long['vintage_timestamp_start'] = long['vintage_period'].map(lambda p: p.to_timestamp() if isinstance(p, pd.Period) else pd.NaT)
-    long['quarter_timestamp_start'] = long['obs_period'].map(lambda p: p.to_timestamp() if isinstance(p, pd.Period) else pd.NaT)
-
-    long = long.sort_values(['vintage_period', 'obs_period']).reset_index(drop=True)
-    long['gdp_growth_annualized'] = (
-        long.groupby('vintage_period')['level']
-        .transform(lambda s: 400.0 * np.log(s / s.shift(1)))
-    )
-    return long
-
-
-def load_release_truth_table(path: Path) -> pd.DataFrame:
-    """
-    Load the Philadelphia Fed first/second/third-release workbook into a tidy
-    table. The relevant header row contains Date, First, Second, Third,
-    Most_Recent.
-    """
-    best: Optional[pd.DataFrame] = None
-    best_score = -np.inf
-
-    for sheet, header, df in _candidate_excel_tables(path):
-        period_col = _find_period_column(df)
-        if period_col is None:
-            continue
-        cols_lower = list(df.columns)
-        first_col = next((c for c in cols_lower if c == 'first' or c.endswith('_first') or 'first' in c), None)
-        second_col = next((c for c in cols_lower if c == 'second' or c.endswith('_second') or 'second' in c), None)
-        third_col = next((c for c in cols_lower if c == 'third' or c.endswith('_third') or 'third' in c), None)
-        latest_col = next((c for c in cols_lower if 'most_recent' in c or c == 'latest' or 'latest' in c), None)
-        required = [first_col, second_col, third_col]
-        if any(c is None for c in required):
-            continue
-
-        period_share = df[period_col].map(lambda x: parse_periodish(x, freq_hint='Q') is not None).mean()
-        numeric_share = pd.concat([
-            pd.to_numeric(df[first_col], errors='coerce'),
-            pd.to_numeric(df[second_col], errors='coerce'),
-            pd.to_numeric(df[third_col], errors='coerce'),
-        ], axis=1).notna().mean().mean()
-        score = 20.0 * period_share + 20.0 * numeric_share + (5.0 if latest_col is not None else 0.0) - 0.1 * header
-        if 'data' in str(sheet).lower():
-            score += 2.0
-        if score > best_score:
-            cols = [period_col, first_col, second_col, third_col] + ([latest_col] if latest_col is not None else [])
-            best = df[cols].copy()
-            best_score = score
-
-    if best is None:
-        raise ValueError(f"Could not detect a release truth table in workbook: {path}")
-
-    period_col = _find_period_column(best)
-    assert period_col is not None
-    out = pd.DataFrame()
-    out['quarter'] = best[period_col].map(lambda x: parse_periodish(x, freq_hint='Q'))
-    out['first_release'] = pd.to_numeric(best[[c for c in best.columns if 'first' in str(c).lower()][0]], errors='coerce')
-    out['second_release'] = pd.to_numeric(best[[c for c in best.columns if 'second' in str(c).lower()][0]], errors='coerce')
-    out['third_release'] = pd.to_numeric(best[[c for c in best.columns if 'third' in str(c).lower()][0]], errors='coerce')
-    latest_matches = [c for c in best.columns if 'most_recent' in str(c).lower() or 'latest' in str(c).lower()]
-    if latest_matches:
-        out['latest'] = pd.to_numeric(best[latest_matches[0]], errors='coerce')
-
-    out = out.dropna(subset=['quarter']).reset_index(drop=True)
-    return out
-
-
-def _extract_wide_quarter_matrix_from_workbook(path: Path, vintage_header_parser) -> Dict[str, Any]:
-    wb = load_workbook(path, read_only=True, data_only=True)
-    best: Optional[Dict[str, Any]] = None
-    best_score = -np.inf
-
-    for sheet_name in wb.sheetnames:
-        values = _trim_2d(_read_sheet_as_values(path, sheet_name))
-        if not values:
-            continue
-        n_rows = len(values)
-        for header_row in range(min(12, n_rows)):
-            row = values[header_row]
-            if not row:
-                continue
-            first_label = normalize_column_name(row[0]).lower() if row[0] is not None else ''
-            quarter_labels = [values[i][0] if values[i] else None for i in range(header_row + 1, len(values))]
-            parsed_quarters = [parse_periodish(v, freq_hint='Q') for v in quarter_labels]
-            release_headers = row[1:]
-            parsed_releases = [vintage_header_parser(v) for v in release_headers]
-            quarter_count = sum(p is not None for p in parsed_quarters)
-            release_count = sum(v is not None for v in parsed_releases)
-            if quarter_count < 3 or release_count < 3:
-                continue
-
-            body_vals = []
-            for i in range(header_row + 1, len(values)):
-                current = values[i] + [None] * (len(row) - len(values[i]))
-                body_vals.extend([pd.to_numeric(x, errors='coerce') for x in current[1:len(row)]])
-            numeric_share = pd.Series(body_vals).notna().mean() if body_vals else 0.0
-            score = quarter_count + release_count + 10.0 * numeric_share
-            if first_label in {'date', 'quarter'}:
-                score += 5.0
-            if score > best_score:
-                best_score = score
-                best = {
-                    'sheet_name': sheet_name,
-                    'header_row': header_row,
-                    'raw_row_labels': quarter_labels,
-                    'row_periods': parsed_quarters,
-                    'raw_col_labels': release_headers,
-                    'col_vintages': parsed_releases,
-                    'values': values,
-                    'n_cols': len(row),
-                }
-
-    if best is None:
-        raise ValueError(f"Could not parse wide quarter-vintage workbook: {path}")
-
-    body = []
-    for i in range(best['header_row'] + 1, len(best['values'])):
-        current = best['values'][i] + [None] * (best['n_cols'] - len(best['values'][i]))
-        body.append([pd.to_numeric(x, errors='coerce') for x in current[1:best['n_cols']]])
-    matrix = pd.DataFrame(body, index=best['row_periods'], columns=best['col_vintages'])
-    matrix = matrix.dropna(how='all').dropna(axis=1, how='all')
-    best['matrix'] = matrix
-    return best
-
-
-def load_gdpplus_latest_table(path: Path, value_label: str = 'gdpplus') -> pd.DataFrame:
-    matrix_info = _extract_wide_quarter_matrix_from_workbook(path, parse_gdpplus_release_timestamp)
-    matrix = matrix_info['matrix'].copy()
-    matrix = matrix.loc[~matrix.index.isna(), :]
-    if matrix.empty:
-        raise ValueError(f"Parsed GDPplus matrix is empty: {path}")
-
-    ordered_cols = sorted(matrix.columns, key=lambda x: pd.Timestamp.min if x is None else x)
-    matrix = matrix.reindex(columns=ordered_cols)
-
-    latest_values = []
-    latest_release_dates = []
-    for _, row in matrix.iterrows():
-        notna_cols = [c for c in matrix.columns if pd.notna(row[c])]
-        if not notna_cols:
-            latest_values.append(np.nan)
-            latest_release_dates.append(pd.NaT)
-        else:
-            last_col = notna_cols[-1]
-            latest_values.append(float(row[last_col]))
-            latest_release_dates.append(last_col)
-
-    out = pd.DataFrame(
-        {
-            'quarter': list(matrix.index),
-            value_label: latest_values,
-            'latest_release_date': latest_release_dates,
-        }
-    )
-    out = out.dropna(subset=['quarter']).reset_index(drop=True)
-    return out
-
-
-def _load_spf_growth_workbook(path: Path, value_label: str) -> pd.DataFrame:
-    xl = pd.ExcelFile(path)
-    preferred_sheets = [s for s in xl.sheet_names if str(s).strip().upper() == 'RGDP']
-    sheet_order = preferred_sheets + [s for s in xl.sheet_names if s not in preferred_sheets]
-
-    best: Optional[pd.DataFrame] = None
-    best_score = -np.inf
-    chosen_value_col: Optional[str] = None
-
-    for sheet in sheet_order:
-        for header in range(0, 8):
-            try:
-                df = pd.read_excel(path, sheet_name=sheet, header=header)
-            except Exception:
-                continue
-            if df is None or df.empty:
-                continue
-            df = df.copy()
-            df.columns = [normalize_column_name(c).lower() for c in df.columns]
-            quarter_series = _period_from_year_quarter_columns(df)
-            if quarter_series is None:
-                continue
-
-            # Prefer the current-quarter growth forecast in the RGDP sheet.
-            preferred_cols = ['drgdp2', 'rgdp2']
-            value_col = next((c for c in preferred_cols if c in df.columns), None)
-            if value_col is None:
-                rgdp_cols = [c for c in df.columns if re.fullmatch(r'd?rgdp[2-6]', str(c).lower())]
-                value_col = rgdp_cols[0] if rgdp_cols else None
-            if value_col is None:
-                continue
-
-            numeric_share = pd.to_numeric(df[value_col], errors='coerce').notna().mean()
-            score = 20.0 * quarter_series.notna().mean() + 20.0 * numeric_share - 0.1 * header
-            if str(sheet).strip().upper() == 'RGDP':
-                score += 5.0
-            if score > best_score:
-                best_score = score
-                best = df.copy()
-                best['_quarter_period'] = quarter_series
-                chosen_value_col = value_col
-
-    if best is None or chosen_value_col is None:
-        raise ValueError(f"Could not parse SPF RGDP growth workbook: {path}")
-
-    out = pd.DataFrame(
-        {
-            'quarter': best['_quarter_period'],
-            value_label: pd.to_numeric(best[chosen_value_col], errors='coerce'),
-        }
-    )
-    out = out.dropna(subset=['quarter']).reset_index(drop=True)
-    return out
-
-
-def load_simple_quarter_value_table(path: Path, value_label: str) -> pd.DataFrame:
-    lower_name = path.name.lower()
-    if 'gdpplus' in lower_name:
-        return load_gdpplus_latest_table(path, value_label=value_label)
-    if 'meangrowth' in lower_name or 'mediangrowth' in lower_name or 'meangrowth' in lower_name or 'mediangrowth' in lower_name:
-        return _load_spf_growth_workbook(path, value_label=value_label)
-
-    best: Optional[pd.DataFrame] = None
-    best_score = -np.inf
-
-    for _, header, df in _candidate_excel_tables(path):
-        period_col = _find_period_column(df)
-        if period_col is None:
-            continue
-        num_cols = [c for c in df.columns if c != period_col and pd.to_numeric(df[c], errors='coerce').notna().mean() > 0.5]
-        if not num_cols:
-            continue
-        period_share = df[period_col].map(lambda x: parse_periodish(x, freq_hint='Q') is not None).mean()
-        numeric_share = pd.to_numeric(df[num_cols[0]], errors='coerce').notna().mean()
-        score = 10.0 * period_share + 10.0 * numeric_share - 0.1 * header
-        if score > best_score:
-            best = df[[period_col] + num_cols].copy()
-            best_score = score
-
-    if best is None:
-        raise ValueError(f"Could not parse quarter/value table from workbook: {path}")
-
-    period_col = _find_period_column(best)
-    assert period_col is not None
-    num_cols = [c for c in best.columns if c != period_col]
-    value_col = num_cols[0]
-
-    out = pd.DataFrame(
-        {
-            'quarter': best[period_col].map(lambda x: parse_periodish(x, freq_hint='Q')),
-            value_label: pd.to_numeric(best[value_col], errors='coerce'),
-        }
-    )
-    return out.dropna(subset=['quarter']).reset_index(drop=True)
-
-
-def build_target_and_truth_objects(repo_root: Path) -> Dict[str, pd.DataFrame]:
-    workbooks = select_target_workbooks(repo_root)
-    if 'routputMvQd.xlsx' not in workbooks and 'ROUTPUTQvQd.xlsx' not in workbooks:
-        raise FileNotFoundError('Could not find ROUTPUT workbook in data/raw.')
-
-    routput_path = workbooks.get('routputMvQd.xlsx', workbooks.get('ROUTPUTQvQd.xlsx'))
-    assert routput_path is not None
-
-    target_vintage = load_routput_vintage_history(routput_path)
-
-    truth_objects: Dict[str, pd.DataFrame] = {
-        'target_vintage_table': target_vintage
-    }
-
-    truth_latest = (
-        target_vintage.dropna(subset=['gdp_growth_annualized'])
-        .sort_values(['obs_period', 'vintage_period'])
-        .groupby('obs_period', as_index=False)
-        .tail(1)
-        .rename(columns={'obs_period': 'quarter'})
-        [['quarter', 'vintage_period', 'gdp_growth_annualized']]
-        .rename(columns={'gdp_growth_annualized': 'latest_rtdsm'})
-        .reset_index(drop=True)
-    )
-    truth_objects['truth_latest'] = truth_latest
-
-    release_path = workbooks.get('routput_first_second_third.xlsx')
-    if release_path is not None:
-        release_truth = load_release_truth_table(release_path)
-        truth_objects['truth_release_table'] = release_truth
-        if 'third_release' in release_truth.columns:
-            truth_objects['truth_third_release'] = (
-                release_truth[['quarter', 'third_release']].dropna().reset_index(drop=True)
-            )
-
-    gdpplus_path = workbooks.get('GDPplus_Vintages.xlsx')
-    if gdpplus_path is not None:
-        truth_objects['truth_gdpplus'] = load_simple_quarter_value_table(gdpplus_path, 'gdpplus')
-
-    mean_path = workbooks.get('meanGrowth.xlsx')
-    if mean_path is not None:
-        truth_objects['spf_mean'] = load_simple_quarter_value_table(mean_path, 'spf_mean')
-
-    median_path = workbooks.get('medianGrowth.xlsx')
-    if median_path is not None:
-        truth_objects['spf_median'] = load_simple_quarter_value_table(median_path, 'spf_median')
-
-    return truth_objects
-
-
-
-def melt_vintage_matrix(matrix_info: Dict[str, Any], value_name: str = 'value') -> pd.DataFrame:
-    matrix = matrix_info['matrix'].copy()
-    row_freq = matrix_info['row_freq']
-    col_freq = matrix_info['col_freq']
-
-    if row_freq not in {'M', 'Q'} and col_freq not in {'M', 'Q'}:
-        raise ValueError('Matrix does not expose monthly/quarterly period axes.')
-
-    # Rows are vintage periods, columns are observed periods.
-    if row_freq == 'M' and col_freq == 'Q':
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore', FutureWarning)
-            stacked = matrix.stack(dropna=False)
-        long = (
-            stacked
-            .rename(value_name)
-            .rename_axis(index=['vintage_period', 'obs_period'])
-            .reset_index()
-        )
-        long['vintage_freq'] = row_freq
-        long['obs_freq'] = col_freq
-        return long
-
-    # Rows are observed quarters, columns are vintage months/quarters.
-    if row_freq == 'Q' and col_freq in {'M', 'Q'}:
-        if col_freq == 'Q':
-            row_index = pd.Index([p for p in matrix.index if isinstance(p, pd.Period)])
-            col_index = pd.Index([p for p in matrix.columns if isinstance(p, pd.Period)])
-            if len(row_index) and len(col_index):
-                row_min = row_index.min()
-                col_min = col_index.min()
-                # In RTDSM quarterly workbooks, observed quarters begin much earlier
-                # than vintage quarters. Use that ordering to orient the matrix.
-                rows_are_obs = row_min < col_min
-            else:
-                rows_are_obs = True
-        else:
-            rows_are_obs = True
-
-        if rows_are_obs:
-            with warnings.catch_warnings():
-                warnings.simplefilter('ignore', FutureWarning)
-                stacked = matrix.T.stack(dropna=False)
-            long = (
-                stacked
-                .rename(value_name)
-                .rename_axis(index=['vintage_period', 'obs_period'])
-                .reset_index()
-            )
-            long['vintage_freq'] = col_freq
-            long['obs_freq'] = row_freq
-            return long
-
-    raise ValueError('Could not orient matrix as vintage x observed-period.')
