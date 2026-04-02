@@ -1,0 +1,37 @@
+block,block_label,factor_name,n_series,coverage,vintage_period,target_quarter
+demand_orders_inventories,Demand / orders / inventories,demand,7,0.0,2000-01,2000Q1
+financial_conditions,Financial conditions,financial,10,0.0,2000-01,2000Q1
+housing_construction,Housing & construction,housing,6,0.0,2000-01,2000Q1
+labor_market,Labor market,labor,8,0.0,2000-01,2000Q1
+prices_inflation,Prices & inflation,prices,6,0.0,2000-01,2000Q1
+real_activity_income,Real activity & income,real_activity,7,0.0,2000-01,2000Q1
+demand_orders_inventories,Demand / orders / inventories,demand,7,0.19047619047619047,2000-02,2000Q1
+financial_conditions,Financial conditions,financial,10,0.3,2000-02,2000Q1
+housing_construction,Housing & construction,housing,6,0.3333333333333333,2000-02,2000Q1
+labor_market,Labor market,labor,8,0.3333333333333333,2000-02,2000Q1
+prices_inflation,Prices & inflation,prices,6,0.3333333333333333,2000-02,2000Q1
+real_activity_income,Real activity & income,real_activity,7,0.3333333333333333,2000-02,2000Q1
+demand_orders_inventories,Demand / orders / inventories,demand,7,0.5238095238095238,2000-03,2000Q1
+financial_conditions,Financial conditions,financial,10,0.6333333333333333,2000-03,2000Q1
+housing_construction,Housing & construction,housing,6,0.6666666666666666,2000-03,2000Q1
+labor_market,Labor market,labor,8,0.6666666666666666,2000-03,2000Q1
+prices_inflation,Prices & inflation,prices,6,0.6666666666666666,2000-03,2000Q1
+real_activity_income,Real activity & income,real_activity,7,0.619047619047619,2000-03,2000Q1
+demand_orders_inventories,Demand / orders / inventories,demand,7,0.0,2000-04,2000Q2
+financial_conditions,Financial conditions,financial,10,0.0,2000-04,2000Q2
+housing_construction,Housing & construction,housing,6,0.0,2000-04,2000Q2
+labor_market,Labor market,labor,8,0.0,2000-04,2000Q2
+prices_inflation,Prices & inflation,prices,6,0.0,2000-04,2000Q2
+real_activity_income,Real activity & income,real_activity,7,0.0,2000-04,2000Q2
+demand_orders_inventories,Demand / orders / inventories,demand,7,0.19047619047619047,2000-05,2000Q2
+financial_conditions,Financial conditions,financial,10,0.3,2000-05,2000Q2
+housing_construction,Housing & construction,housing,6,0.3333333333333333,2000-05,2000Q2
+labor_market,Labor market,labor,8,0.3333333333333333,2000-05,2000Q2
+prices_inflation,Prices & inflation,prices,6,0.3333333333333333,2000-05,2000Q2
+real_activity_income,Real activity & income,real_activity,7,0.3333333333333333,2000-05,2000Q2
+demand_orders_inventories,Demand / orders / inventories,demand,7,0.5238095238095238,2000-06,2000Q2
+financial_conditions,Financial conditions,financial,10,0.6333333333333333,2000-06,2000Q2
+housing_construction,Housing & construction,housing,6,0.6666666666666666,2000-06,2000Q2
+labor_market,Labor market,labor,8,0.6666666666666666,2000-06,2000Q2
+prices_inflation,Prices & inflation,prices,6,0.6666666666666666,2000-06,2000Q2
+real_activity_income,Real activity & income,real_activity,7,0.6666666666666666,2000-06,2000Q2
