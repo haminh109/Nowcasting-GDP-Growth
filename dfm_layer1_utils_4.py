@@ -1463,35 +1463,186 @@ def as_model_index(df: pd.DataFrame) -> pd.DataFrame:
         f"Model inputs must be indexed by PeriodIndex or DatetimeIndex. Got {type(idx).__name__}."
     )
 
-def _coerce_impact_date_for_model_index(index: pd.Index, target_quarter: pd.Period):
-    """
-    Map the quarter-end impact month to the actual label type used by the
-    statsmodels comparison dataset.
 
-    The model should think in monthly periods for the mixed-frequency news
-    decomposition. We therefore keep `2026-03` as the period label when the
-    model index is PeriodIndex, and only convert to timestamps when the model
-    is actually indexed by timestamps.
+def build_monotonic_mixed_frequency_endog(
+    monthly_panel: pd.DataFrame,
+    quarterly_target: pd.DataFrame,
+    quarterly_target_name: str = "gdp_growth",
+) -> Tuple[pd.DataFrame, int]:
     """
+    Construct a mixed-frequency monthly endog matrix with a monotonic index.
+
+    statsmodels DynamicFactorMQ.construct_endog concatenates the monthly panel
+    with a monthly-resampled quarterly target, but it does not sort the unioned
+    index. When the quarterly history starts earlier than the monthly panel
+    (which is the case in this repository), the resulting row labels are
+    non-monotonic. statsmodels then treats the date index as unsupported,
+    falls back to a generated RangeIndex, and date-based prediction / news
+    resolution breaks for out-of-sample impact dates such as 2026-03.
+
+    This helper preserves the repository's first-of-month / first-of-quarter
+    semantics by staying in PeriodIndex space and explicitly sorting the mixed
+    frequency dataset before model initialization.
+    """
+    monthly_panel_model = as_model_index(monthly_panel)
+
+    if isinstance(quarterly_target, pd.Series):
+        quarterly_target_model = quarterly_target.to_frame(name=quarterly_target_name)
+    else:
+        quarterly_target_model = quarterly_target.copy()
+        if quarterly_target_name in quarterly_target_model.columns:
+            quarterly_target_model = quarterly_target_model[[quarterly_target_name]]
+        elif quarterly_target_model.shape[1] != 1:
+            raise KeyError(
+                "Quarterly target must either contain the requested target column "
+                f"{quarterly_target_name!r} or contain exactly one column. "
+                f"Got columns={quarterly_target_model.columns.tolist()}."
+            )
+
+    quarterly_target_model = as_model_index(quarterly_target_model)
+
+    endog, k_endog_monthly = DynamicFactorMQ.construct_endog(
+        monthly_panel_model,
+        quarterly_target_model,
+    )
+    if not isinstance(endog, pd.DataFrame):
+        endog = pd.DataFrame(endog)
+
+    if not isinstance(endog.index, (pd.PeriodIndex, pd.DatetimeIndex)):
+        raise TypeError(
+            "The mixed-frequency endog index must remain date-based after "
+            f"construction. Got {type(endog.index).__name__}."
+        )
+
+    endog = endog.sort_index()
+
+    if isinstance(endog.index, pd.Index) and endog.index.has_duplicates:
+        duplicate_preview = endog.index[endog.index.duplicated()].unique().tolist()[:5]
+        raise ValueError(
+            "Mixed-frequency endog contains duplicate time labels after sorting. "
+            f"Example duplicates: {duplicate_preview}."
+        )
+
+    if isinstance(endog.index, (pd.PeriodIndex, pd.DatetimeIndex)) and not endog.index.is_monotonic_increasing:
+        raise ValueError(
+            "Mixed-frequency endog index is still non-monotonic after sorting. "
+            f"min_index={endog.index.min()}, max_index={endog.index.max()}, freq={getattr(endog.index, 'freqstr', None)}."
+        )
+
+    return endog, int(k_endog_monthly)
+
+
+def _prediction_index_object(model_or_index) -> pd.Index:
+    """
+    Return the actual index object that statsmodels will rely on for date-based
+    prediction resolution whenever possible.
+    """
+    if isinstance(model_or_index, pd.Index):
+        return model_or_index
+
+    if hasattr(model_or_index, "_get_prediction_index"):
+        supported_index = getattr(model_or_index, "_index", None)
+        if isinstance(supported_index, pd.Index):
+            return supported_index
+        row_labels = getattr(getattr(model_or_index, "data", None), "row_labels", None)
+        if isinstance(row_labels, pd.Index):
+            return row_labels
+
+    raise TypeError(
+        "Expected a pandas Index or a statsmodels time-series model object with "
+        f"prediction index metadata. Got {type(model_or_index).__name__}."
+    )
+
+
+def model_index_audit_frame(model) -> pd.DataFrame:
+    """
+    Compact audit view of the supported model index and the original row labels.
+    """
+    rows: List[Dict[str, Any]] = []
+    supported_index = getattr(model, "_index", None)
+    row_labels = getattr(getattr(model, "data", None), "row_labels", None)
+
+    for role, index in [("supported_index", supported_index), ("row_labels", row_labels)]:
+        row: Dict[str, Any] = {
+            "index_role": role,
+            "index_type": type(index).__name__,
+            "freq": getattr(index, "freqstr", None),
+            "nobs": len(index) if isinstance(index, pd.Index) else np.nan,
+            "is_monotonic_increasing": (
+                bool(index.is_monotonic_increasing)
+                if isinstance(index, (pd.PeriodIndex, pd.DatetimeIndex))
+                else np.nan
+            ),
+            "has_duplicates": bool(index.has_duplicates) if isinstance(index, pd.Index) else np.nan,
+            "min_index": index.min() if isinstance(index, pd.Index) and len(index) else None,
+            "max_index": index.max() if isinstance(index, pd.Index) and len(index) else None,
+        }
+        rows.append(row)
+
+    return pd.DataFrame(rows)
+
+
+def _coerce_impact_date_for_model_index(model_or_index, target_quarter: pd.Period):
+    """
+    Map the quarter-end impact month to the label type used by the actual
+    statsmodels prediction index.
+
+    The Layer-1 nowcast should target the quarter-end month itself (e.g.
+    2026Q1 -> 2026-03). We therefore preserve monthly Period semantics when the
+    model uses a PeriodIndex, and only convert to timestamps when the model is
+    genuinely timestamp-based.
+    """
+    index = _prediction_index_object(model_or_index)
     impact_month = get_quarter_end_month(target_quarter)
+
     if isinstance(index, pd.PeriodIndex):
         return impact_month.asfreq(index.freq)
+
     if isinstance(index, pd.DatetimeIndex):
         freqstr = str(getattr(index, "freqstr", "") or "")
         if freqstr.startswith("M") and not freqstr.startswith("MS"):
             return impact_month.to_timestamp(how="end")
         return impact_month.to_timestamp(how="start")
+
     raise TypeError(
         "News comparison index must be a PeriodIndex or DatetimeIndex; "
         f"got {type(index).__name__}."
     )
 
 
-def _assert_news_impact_date_supported(index: pd.Index, impact_date, *, vintage: pd.Period, target_quarter: pd.Period) -> None:
+def _assert_news_impact_date_supported(model_or_index, impact_date, *, vintage: pd.Period, target_quarter: pd.Period) -> None:
     """
-    Fail fast with a clear message if statsmodels will not be able to locate or
-    extend the requested impact date on the comparison index.
+    Fail fast with a clear message if statsmodels will not be able to resolve
+    the requested impact date on the *actual* internal prediction index.
+
+    This deliberately mirrors statsmodels' own `_get_prediction_index`
+    machinery whenever a model object is available, instead of validating only
+    against an external comparison DataFrame index.
     """
+    if hasattr(model_or_index, "_get_prediction_index"):
+        model = model_or_index
+        try:
+            model._get_prediction_index(impact_date, impact_date)
+            return
+        except Exception as exc:
+            supported_index = getattr(model, "_index", None)
+            row_labels = getattr(getattr(model, "data", None), "row_labels", None)
+            raise ValueError(
+                "News impact date is incompatible with the actual statsmodels model index. "
+                f"vintage={vintage}, target_quarter={target_quarter}, impact_date={impact_date}, "
+                f"supported_index_type={type(supported_index).__name__}, "
+                f"supported_freq={getattr(supported_index, 'freqstr', None)}, "
+                f"supported_min={supported_index.min() if isinstance(supported_index, pd.Index) and len(supported_index) else None}, "
+                f"supported_max={supported_index.max() if isinstance(supported_index, pd.Index) and len(supported_index) else None}, "
+                f"row_labels_type={type(row_labels).__name__}, "
+                f"row_labels_freq={getattr(row_labels, 'freqstr', None)}, "
+                f"row_labels_monotonic={getattr(row_labels, 'is_monotonic_increasing', None)}, "
+                f"row_labels_min={row_labels.min() if isinstance(row_labels, pd.Index) and len(row_labels) else None}, "
+                f"row_labels_max={row_labels.max() if isinstance(row_labels, pd.Index) and len(row_labels) else None}."
+            ) from exc
+
+    index = _prediction_index_object(model_or_index)
+
     from statsmodels.tsa.base.tsa_model import get_index_loc
 
     try:
@@ -1501,15 +1652,11 @@ def _assert_news_impact_date_supported(index: pd.Index, impact_date, *, vintage:
         max_idx = index.max() if len(index) else None
         freqstr = getattr(index, "freqstr", None)
         raise ValueError(
-            "News impact date is incompatible with the comparison model index. "
+            "News impact date is incompatible with the comparison index. "
             f"vintage={vintage}, target_quarter={target_quarter}, impact_date={impact_date}, "
             f"index_type={type(index).__name__}, freq={freqstr}, min_index={min_idx}, max_index={max_idx}."
         ) from exc
 
-
-# --------------------------------------------------------------------------------------
-# Dynamic factor model fitting, nowcast extraction, news decomposition
-# --------------------------------------------------------------------------------------
 
 def select_factor_order(
     monthly_panel: pd.DataFrame,
@@ -1522,16 +1669,21 @@ def select_factor_order(
 ) -> int:
     best_p = int(candidate_orders[0])
     best_bic = np.inf
+
+    endog_model, k_endog_monthly = build_monotonic_mixed_frequency_endog(
+        monthly_panel,
+        quarterly_target,
+    )
+
     for p in candidate_orders:
-        factor_orders = {key: int(p) for key in {tuple(v for v in ["global"]), *[tuple([x]) for x in sorted({f for v in factors.values() for f in v if f != "global"})]}}
-        # The line above creates duplicate global + blocks. Rebuild explicitly.
         factor_orders = {("global",): int(p)}
         block_factor_names = sorted({f for v in factors.values() for f in v if f not in {"global"}})
         for name in block_factor_names:
             factor_orders[(name,)] = int(p)
+
         model = DynamicFactorMQ(
-            monthly_panel,
-            endog_quarterly=quarterly_target,
+            endog_model,
+            k_endog_monthly=k_endog_monthly,
             factors=factors,
             factor_orders=factor_orders,
             idiosyncratic_ar1=idiosyncratic_ar1,
@@ -1562,12 +1714,15 @@ def fit_dfm_single_vintage(
     factors, factor_orders = build_factor_mapping(monthly_panel.columns, panel_meta, quarterly_target_name)
     factor_orders = {k: factor_order for k in factor_orders}
 
-    monthly_panel_model = as_model_index(monthly_panel)
-    quarterly_target_model = as_model_index(quarterly_target[[quarterly_target_name]])
+    endog_model, k_endog_monthly = build_monotonic_mixed_frequency_endog(
+        monthly_panel,
+        quarterly_target[[quarterly_target_name]],
+        quarterly_target_name=quarterly_target_name,
+    )
 
     model = DynamicFactorMQ(
-        monthly_panel_model,
-        endog_quarterly=quarterly_target_model,
+        endog_model,
+        k_endog_monthly=k_endog_monthly,
         factors=factors,
         factor_orders=factor_orders,
         idiosyncratic_ar1=idiosyncratic_ar1,
@@ -1596,8 +1751,20 @@ def extract_nowcast_from_results(
     that month. If not, use the required monthly forecast horizon.
     """
     q_end_month_period = get_quarter_end_month(target_quarter)
-    sample_end_raw = results.model.data.row_labels[-1]
-    sample_end_period = sample_end_raw if isinstance(sample_end_raw, pd.Period) else pd.Period(pd.Timestamp(sample_end_raw), freq="M")
+    supported_index = _prediction_index_object(results.model)
+
+    if not isinstance(supported_index, (pd.PeriodIndex, pd.DatetimeIndex)) or len(supported_index) == 0:
+        raise ValueError(
+            "Could not determine a supported date index from the fitted model "
+            "when extracting the nowcast."
+        )
+
+    sample_end_raw = supported_index[-1]
+    sample_end_period = (
+        sample_end_raw
+        if isinstance(sample_end_raw, pd.Period)
+        else pd.Period(pd.Timestamp(sample_end_raw), freq="M")
+    )
 
     if q_end_month_period <= sample_end_period:
         pred = results.get_prediction(
@@ -1610,37 +1777,6 @@ def extract_nowcast_from_results(
     steps = q_end_month_period.ordinal - sample_end_period.ordinal
     forecast = results.get_forecast(steps=steps).predicted_mean
     return float(forecast.iloc[-1][quarterly_target_name])
-
-
-def _factor_anchor_signs(results, panel_meta: pd.DataFrame) -> Dict[str, int]:
-    params = results.params
-    signs: Dict[str, int] = {"global": 1}
-    anchor_rows = panel_meta[panel_meta["anchor"] == True]
-    for _, row in anchor_rows.iterrows():
-        factor_name = row["factor_name"]
-        if pd.isna(factor_name):
-            continue
-        factor_name = str(factor_name)
-        mnemonic = str(row["mnemonic"])
-        key = f"loading.{factor_name}->{mnemonic}"
-        if key in params.index:
-            signs[factor_name] = 1 if float(params.loc[key]) >= 0 else -1
-    # Global factor orientation: prefer INDPRO if available, otherwise first loading.
-    global_key_candidates = [f"loading.global->{m}" for m in anchor_rows["mnemonic"].astype(str)]
-    for key in global_key_candidates:
-        if key in params.index:
-            signs["global"] = 1 if float(params.loc[key]) >= 0 else -1
-            break
-    return signs
-
-
-def oriented_factor_states(results, panel_meta: pd.DataFrame, kind: str = "smoothed") -> pd.DataFrame:
-    factors_df = getattr(results.factors, kind).copy()
-    signs = _factor_anchor_signs(results, panel_meta)
-    for col in factors_df.columns:
-        sign = signs.get(str(col), 1)
-        factors_df[col] = factors_df[col] * sign
-    return factors_df
 
 
 def flatten_news_results(
@@ -1905,24 +2041,35 @@ def run_layer1_dfm(config: ProtocolConfig) -> Dict[str, pd.DataFrame]:
             comparison_monthly_model = as_model_index(comparison_monthly)
             quarterly_target_model = as_model_index(quarterly_target[["gdp_growth"]])
 
+            comparison_endog_model, comparison_k_endog_monthly = build_monotonic_mixed_frequency_endog(
+                comparison_monthly_model,
+                quarterly_target_model,
+                quarterly_target_name="gdp_growth",
+            )
+            comparison_model = prev_results.model.clone(
+                comparison_endog_model,
+                k_endog_monthly=comparison_k_endog_monthly,
+                retain_standardization=True,
+            )
+
             impact_date = _coerce_impact_date_for_model_index(
-                comparison_monthly_model.index,
+                comparison_model,
                 target_quarter,
             )
             _assert_news_impact_date_supported(
-                comparison_monthly_model.index,
+                comparison_model,
                 impact_date,
                 vintage=vintage,
                 target_quarter=target_quarter,
             )
 
             news = prev_results.news(
-                comparison_monthly_model,
+                comparison_endog_model,
                 comparison_type="updated",
                 impact_date=impact_date,
                 impacted_variable="gdp_growth",
-                endog_quarterly=quarterly_target_model,
                 original_scale=True,
+                k_endog_monthly=comparison_k_endog_monthly,
             )
             news_series, news_blocks = flatten_news_results(news, panel_meta, impacted_variable="gdp_growth")
             news_series["vintage_period"] = vintage
@@ -2047,37 +2194,4 @@ def run_layer1_dfm(config: ProtocolConfig) -> Dict[str, pd.DataFrame]:
         **target_objects,
     }
 
-# --------------------------------------------------------------------------------------
-# Presentation helpers for the notebook
-# --------------------------------------------------------------------------------------
 
-def protocol_summary_frame(config: ProtocolConfig) -> pd.DataFrame:
-    payload = asdict(config)
-    return pd.DataFrame({"setting": list(payload.keys()), "value": list(payload.values())})
-
-
-def completion_checklist_frame(output_dir: Path) -> pd.DataFrame:
-    expected = [
-        ("layer1_protocol.json", ["layer1_protocol.json"]),
-        ("dfm_nowcasts.csv", ["dfm_nowcasts.csv"]),
-        ("dfm_states.parquet|csv", ["dfm_states.parquet", "dfm_states.csv"]),
-        ("dfm_news_series.csv", ["dfm_news_series.csv"]),
-        ("dfm_news_blocks.csv", ["dfm_news_blocks.csv"]),
-        ("dfm_coverage.csv", ["dfm_coverage.csv"]),
-        ("dfm_diagnostics.csv", ["dfm_diagnostics.csv"]),
-        ("vintage_manifest_monthly.csv", ["vintage_manifest_monthly.csv"]),
-        ("vintage_manifest_quarterly.csv", ["vintage_manifest_quarterly.csv"]),
-        ("repository_catalog.csv", ["repository_catalog.csv"]),
-    ]
-    rows = []
-    for label, candidates in expected:
-        existing = [output_dir / c for c in candidates if (output_dir / c).exists()]
-        rows.append(
-            {
-                "artifact": label,
-                "exists": len(existing) > 0,
-                "resolved_path": existing[0].name if existing else None,
-                "size_bytes": existing[0].stat().st_size if existing else np.nan,
-            }
-        )
-    return pd.DataFrame(rows)
