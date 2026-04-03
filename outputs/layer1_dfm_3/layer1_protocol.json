@@ -1,6 +1,6 @@
 {
   "repo_root": "/Users/haaminh109/Desktop/Minh/Ta\u0300i lie\u0323\u0302u ho\u0323c ta\u0323\u0302p (DSEB)/Ki\u0300 6/Time Series/Final Project/Test/hybrid_dfm_ml_nowcasting",
-  "output_dir": "/Users/haaminh109/Desktop/Minh/Ta\u0300i lie\u0323\u0302u ho\u0323c ta\u0323\u0302p (DSEB)/Ki\u0300 6/Time Series/Final Project/Test/hybrid_dfm_ml_nowcasting/outputs/layer1_dfm",
+  "output_dir": "/Users/haaminh109/Desktop/Minh/Ta\u0300i lie\u0323\u0302u ho\u0323c ta\u0323\u0302p (DSEB)/Ki\u0300 6/Time Series/Final Project/Test/hybrid_dfm_ml_nowcasting/outputs/layer1_dfm_3",
   "benchmark_start_quarter": "2000Q1",
   "panel_mode": "stable",
   "truth_main": "third_release",
