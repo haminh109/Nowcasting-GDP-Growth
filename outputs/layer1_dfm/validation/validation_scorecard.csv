@@ -6,8 +6,8 @@ internal_consistency,3,3,17.0,17.0,0,0,100.0
 layer2_readiness,5,5,31.0,31.0,0,0,100.0
 leakage,2,2,17.0,17.0,0,0,100.0
 mixed_frequency_alignment,1,1,6.0,6.0,0,0,100.0
-news_reconciliation,3,2,13.0,7.0,0,1,53.84615384615385
+news_reconciliation,3,3,13.0,13.0,0,0,100.0
 pseudo_realtime_performance,2,2,9.0,9.0,0,0,100.0
 repository_integrity,14,14,66.0,66.0,0,0,100.0
 transformations,4,4,23.0,23.0,0,0,100.0
-vintage_protocol,3,2,22.0,16.0,1,0,72.72727272727273
+vintage_protocol,3,3,22.0,22.0,0,0,100.0

@@ -7,6 +7,9 @@ news_abs__demand_orders_inventories,0.9904458598726115
 news_abs__real_activity_income,0.9904458598726115
 news_signed__demand_orders_inventories,0.9904458598726115
 news_signed__real_activity_income,0.9904458598726115
+dfm_nowcast_delta_from_previous_row,0.9968152866242038
+dfm_nowcast_delta_from_previous_row_fixed_params,0.9968152866242038
+dfm_nowcast_previous_vintage_same_target,0.9968152866242038
 dfm_nowcast_pure_news_fixed_params,0.9968152866242038
 dfm_nowcast_revision_from_previous,0.9968152866242038
 dfm_nowcast_revision_full_refit,0.9968152866242038
@@ -43,6 +46,7 @@ model_index_generated,1.0
 model_index_monotonic,1.0
 model_index_type,1.0
 monthly_snapshot_path,1.0
+monthly_snapshot_source_path,1.0
 n_monthly_obs,1.0
 n_monthly_series,1.0
 n_series__demand_orders_inventories,1.0

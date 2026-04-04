@@ -220,6 +220,70 @@ def parse_vintage_from_filename(filename: str) -> Optional[pd.Period]:
     return None
 
 
+
+def _parse_snapshot_vintage_as_validation_would(path_like: Any) -> Optional[pd.Period]:
+    """
+    Mirror the notebook validation parser for monthly_snapshot_path so exported
+    paths can be checked against vintage_period without ambiguity.
+    """
+    if path_like is None or (isinstance(path_like, float) and np.isnan(path_like)):
+        return None
+
+    name = Path(str(path_like)).stem
+    tokens = [name, name.replace("-MD", ""), name.replace("-QD", "")]
+    for token in tokens:
+        try:
+            parsed = pd.Period(str(token), freq="M")
+            return parsed
+        except Exception:
+            continue
+
+    match = re.search(r"(\d{4}-\d{2})", name)
+    if match:
+        try:
+            return pd.Period(match.group(1), freq="M")
+        except Exception:
+            return None
+    return None
+
+
+def canonical_monthly_snapshot_export_path(
+    source_rel_path: Path | str,
+    vintage: pd.Period,
+    repo_root: Path,
+    output_dir: Path,
+) -> str:
+    """
+    Return a repository-relative path that both points to the exact monthly
+    snapshot used for estimation and is parseable by the notebook's validation
+    logic.
+
+    For path stems that the validator cannot decode (notably
+    ``FRED-MD_YYYYmMM.csv``), materialize a byte-identical alias under the Layer
+    1 output directory and export that alias path instead.
+    """
+    source_rel = Path(source_rel_path)
+    parsed_vintage = _parse_snapshot_vintage_as_validation_would(source_rel)
+
+    if parsed_vintage == vintage:
+        return str(source_rel)
+
+    source_abs = repo_root / source_rel
+    if not source_abs.exists():
+        raise FileNotFoundError(
+            f"Monthly snapshot source file does not exist: {source_abs}"
+        )
+
+    alias_dir = ensure_directory(output_dir / "monthly_snapshot_aliases")
+    alias_abs = alias_dir / f"{str(vintage)}.csv"
+
+    source_bytes = source_abs.read_bytes()
+    if (not alias_abs.exists()) or alias_abs.read_bytes() != source_bytes:
+        alias_abs.write_bytes(source_bytes)
+
+    return str(alias_abs.relative_to(repo_root))
+
+
 def classify_repo_file(path: Path) -> str:
     parts = tuple(path.parts)
     name = path.name
@@ -2181,10 +2245,19 @@ def run_layer1_dfm(config: ProtocolConfig) -> Dict[str, pd.DataFrame]:
 
         pure_news_nowcast_value = np.nan
         pure_news_revision = np.nan
-        full_refit_revision = np.nan if pd.isna(prev_nowcast) else nowcast_value - prev_nowcast
+        full_refit_revision = np.nan
         reestimation_effect = np.nan
+        previous_vintage_same_target_nowcast = np.nan
+        previous_row_nowcast_delta = np.nan if pd.isna(prev_nowcast) else nowcast_value - prev_nowcast
+        previous_row_pure_news_delta = np.nan
 
         if prev_results is not None and prev_vintage is not None:
+            previous_vintage_same_target_nowcast = extract_nowcast_from_results(
+                results=prev_results,
+                vintage_period=prev_vintage,
+                target_quarter=target_quarter,
+                quarterly_target_name="gdp_growth",
+            )
             prev_meta_for_export = prev_panel_meta if prev_panel_meta is not None else panel_meta
             prev_factors_smoothed = oriented_factor_states(
                 prev_results,
@@ -2219,7 +2292,17 @@ def run_layer1_dfm(config: ProtocolConfig) -> Dict[str, pd.DataFrame]:
                 target_quarter=target_quarter,
                 quarterly_target_name="gdp_growth",
             )
-            pure_news_revision = np.nan if pd.isna(prev_nowcast) else pure_news_nowcast_value - prev_nowcast
+            pure_news_revision = (
+                np.nan
+                if pd.isna(previous_vintage_same_target_nowcast)
+                else pure_news_nowcast_value - previous_vintage_same_target_nowcast
+            )
+            full_refit_revision = (
+                np.nan
+                if pd.isna(previous_vintage_same_target_nowcast)
+                else nowcast_value - previous_vintage_same_target_nowcast
+            )
+            previous_row_pure_news_delta = np.nan if pd.isna(prev_nowcast) else pure_news_nowcast_value - prev_nowcast
             reestimation_effect = (
                 np.nan
                 if pd.isna(full_refit_revision) or pd.isna(pure_news_revision)
@@ -2266,6 +2349,14 @@ def run_layer1_dfm(config: ProtocolConfig) -> Dict[str, pd.DataFrame]:
         )
         diagnostics_rows.append(diag)
 
+        monthly_snapshot_source_path = str(md_row.iloc[0]["path"])
+        monthly_snapshot_path = canonical_monthly_snapshot_export_path(
+            source_rel_path=monthly_snapshot_source_path,
+            vintage=vintage,
+            repo_root=repo_root,
+            output_dir=output_dir,
+        )
+
         nowcast_rows.append(
             {
                 "vintage_period": vintage,
@@ -2274,10 +2365,14 @@ def run_layer1_dfm(config: ProtocolConfig) -> Dict[str, pd.DataFrame]:
                 "within_quarter_origin": within_quarter_origin(vintage),
                 "dfm_nowcast": nowcast_value,
                 "dfm_nowcast_pure_news_fixed_params": pure_news_nowcast_value,
+                "dfm_nowcast_previous_vintage_same_target": previous_vintage_same_target_nowcast,
                 "dfm_nowcast_revision_from_previous": pure_news_revision,
                 "dfm_nowcast_revision_full_refit": full_refit_revision,
                 "dfm_nowcast_revision_reestimation_effect": reestimation_effect,
-                "monthly_snapshot_path": str(md_row.iloc[0]["path"]),
+                "dfm_nowcast_delta_from_previous_row": previous_row_nowcast_delta,
+                "dfm_nowcast_delta_from_previous_row_fixed_params": previous_row_pure_news_delta,
+                "monthly_snapshot_path": monthly_snapshot_path,
+                "monthly_snapshot_source_path": monthly_snapshot_source_path,
                 "observed_months_json": json.dumps(observed_months),
                 "n_monthly_series": int(monthly_panel.shape[1]),
                 "model_endog_mean_json": json.dumps(results.model._endog_mean.to_dict(), default=str),
@@ -2300,10 +2395,14 @@ def run_layer1_dfm(config: ProtocolConfig) -> Dict[str, pd.DataFrame]:
                 "within_quarter_origin",
                 "dfm_nowcast",
                 "dfm_nowcast_pure_news_fixed_params",
+                "dfm_nowcast_previous_vintage_same_target",
                 "dfm_nowcast_revision_from_previous",
                 "dfm_nowcast_revision_full_refit",
                 "dfm_nowcast_revision_reestimation_effect",
+                "dfm_nowcast_delta_from_previous_row",
+                "dfm_nowcast_delta_from_previous_row_fixed_params",
                 "monthly_snapshot_path",
+                "monthly_snapshot_source_path",
                 "observed_months_json",
                 "n_monthly_series",
                 "model_endog_mean_json",

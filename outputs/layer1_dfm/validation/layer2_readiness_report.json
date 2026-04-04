@@ -1,30 +1,12 @@
 {
-  "gate_decision": "NOT READY FOR LAYER 2",
-  "overall_score_pct": 95.47,
+  "gate_decision": "READY FOR LAYER 2",
+  "overall_score_pct": 100.0,
   "checks_total": 47,
-  "checks_passed": 45,
-  "checks_failed": 2,
-  "critical_failures": [
-    {
-      "check_id": "vintage_protocol__snapshot_path_matches_vintage",
-      "message": "Each nowcast row points to the monthly snapshot corresponding to the same vintage.",
-      "details": "The validation parses the vintage directly from monthly_snapshot_path and compares it to vintage_period."
-    }
-  ],
-  "major_failures": [
-    {
-      "check_id": "news__block_news_reconciles_to_revision_within_loose_tolerance",
-      "message": "Block-level news approximately reconciles with the nowcast revision across vintages.",
-      "details": "Loose-pass share=0.792; median abs gap=0.2338."
-    }
-  ],
-  "warnings": [
-    {
-      "check_id": "news__block_news_reconciles_to_revision_within_loose_tolerance",
-      "message": "Block-level news approximately reconciles with the nowcast revision across vintages.",
-      "details": "Loose-pass share=0.792; median abs gap=0.2338."
-    }
-  ],
+  "checks_passed": 47,
+  "checks_failed": 0,
+  "critical_failures": [],
+  "major_failures": [],
+  "warnings": [],
   "passed_checks": [
     {
       "check_id": "artifact_exists__nowcasts",
@@ -101,6 +83,10 @@
     {
       "check_id": "vintage_protocol__sample_end_is_vintage_minus_one_month",
       "message": "The model sample ends exactly one month before the vintage marker, consistent with first-of-month vintage semantics."
+    },
+    {
+      "check_id": "vintage_protocol__snapshot_path_matches_vintage",
+      "message": "Each nowcast row points to the monthly snapshot corresponding to the same vintage."
     },
     {
       "check_id": "leakage__current_quarter_month_cap",
@@ -187,6 +173,10 @@
       "message": "News decomposition rows are available for almost every revision-bearing vintage."
     },
     {
+      "check_id": "news__block_news_reconciles_to_revision_within_loose_tolerance",
+      "message": "Block-level news approximately reconciles with the nowcast revision across vintages."
+    },
+    {
       "check_id": "news__sign_convention_internally_consistent",
       "message": "The sign of block-level news comoves with the sign of the overall nowcast revision."
     },
@@ -207,10 +197,7 @@
       "message": "Factor-state features are available for Layer 2 feature engineering."
     }
   ],
-  "remediation_items": [
-    "Repair artifact joins if any nowcast row references the wrong source snapshot.",
-    "Separate pure-news revision effects from parameter re-estimation effects, or export the full revision decomposition explicitly."
-  ],
+  "remediation_items": [],
   "layer2_candidate_rows": 314,
   "layer2_residual_target_rows": 306,
   "mostly_missing_features": [],
