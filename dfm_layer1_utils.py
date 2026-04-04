@@ -139,6 +139,11 @@ class ProtocolConfig:
     idiosyncratic_ar1: bool = True
     em_maxiter: int = 100
     em_tolerance: float = 1e-6
+    warm_start_from_previous_vintage: bool = True
+    export_same_tau_residual_lags: bool = False
+    state_standardize: bool = True
+    state_center: bool = True
+    state_scale_floor: float = 1e-6
     vintage_limit: Optional[int] = None
     min_monthly_obs: int = 24
     force_refit: bool = True
@@ -191,14 +196,19 @@ def to_month_period_from_filename(year: int, month: int) -> pd.Period:
 def parse_vintage_from_filename(filename: str) -> Optional[pd.Period]:
     """
     Parse repository vintage markers without forcing month-end timestamps.
-    Returns a monthly Period when possible.
+
+    The repository mixes ISO-like filenames (``YYYY-MM-DD.csv``), plain monthly
+    stamps (``YYYY-MM.csv``), and FRED historical vintages such as
+    ``FRED-MD_2024m03.csv`` or ``FRED-QD_2019m1.csv``. The parser must accept
+    both one-digit and two-digit month codes so that internal vintage schedules
+    are complete and pseudo-real-time gaps are not created mechanically.
     """
     name = Path(filename).name
 
     patterns = [
         r"(?P<y>\d{4})-(?P<m>\d{2})-(?P<d>\d{2})\.csv$",
         r"(?P<y>\d{4})-(?P<m>\d{2})(?:-(?:MD|QD))?\.csv$",
-        r"FRED-QD_(?P<y>\d{4})m(?P<m>\d{2})\.csv$",
+        r"FRED-(?:MD|QD)_(?P<y>\d{4})m(?P<m>\d{1,2})\.csv$",
     ]
     for pattern in patterns:
         match = re.search(pattern, name, flags=re.IGNORECASE)
@@ -1713,6 +1723,48 @@ def select_factor_order(
     return best_p
 
 
+def em_convergence_delta_from_llf(llf_path: Sequence[float]) -> float:
+    """
+    Replicate the relative EM convergence criterion used by
+    ``statsmodels.DynamicFactorMQ.fit_em``:
+
+        delta_t = 2 * |llf_t - llf_{t-1}| / (|llf_t| + |llf_{t-1}|)
+
+    This is the criterion actually compared with the configured tolerance, so
+    diagnostics should report it directly rather than using an unrelated
+    absolute-difference heuristic.
+    """
+    arr = np.asarray(llf_path, dtype=float)
+    if arr.size < 2 or not np.isfinite(arr[-1]) or not np.isfinite(arr[-2]):
+        return np.nan if arr.size < 2 else np.inf
+    denom = np.abs(arr[-1]) + np.abs(arr[-2])
+    if not np.isfinite(denom) or denom == 0:
+        return np.inf
+    return float(2.0 * np.abs(arr[-1] - arr[-2]) / denom)
+
+
+def _coerce_start_params_for_model(model, start_params: Optional[Sequence[float]]):
+    if start_params is None:
+        return None
+
+    param_names = list(getattr(model, "param_names", []) or [])
+    if isinstance(start_params, pd.Series):
+        if param_names and not set(param_names).issubset(set(start_params.index)):
+            return None
+        arr = (
+            pd.to_numeric(start_params.reindex(param_names), errors="coerce").to_numpy(dtype=float)
+            if param_names
+            else pd.to_numeric(start_params, errors="coerce").to_numpy(dtype=float)
+        )
+    else:
+        arr = np.asarray(start_params, dtype=float).reshape(-1)
+
+    expected_k = int(getattr(model, "k_params", arr.size))
+    if arr.size != expected_k or not np.all(np.isfinite(arr)):
+        return None
+    return arr
+
+
 def fit_dfm_single_vintage(
     monthly_panel: pd.DataFrame,
     quarterly_target: pd.DataFrame,
@@ -1722,6 +1774,7 @@ def fit_dfm_single_vintage(
     em_maxiter: int = 100,
     em_tolerance: float = 1e-6,
     quarterly_target_name: str = "gdp_growth",
+    start_params: Optional[Sequence[float]] = None,
 ):
     factors, factor_orders = build_factor_mapping(monthly_panel.columns, panel_meta, quarterly_target_name)
     factor_orders = {k: factor_order for k in factor_orders}
@@ -1741,7 +1794,10 @@ def fit_dfm_single_vintage(
         standardize=True,
         init_t0=False,
     )
+    start_params_model = _coerce_start_params_for_model(model, start_params)
     results = model.fit_em(
+        start_params=start_params_model,
+        transformed=True,
         maxiter=em_maxiter,
         tolerance=em_tolerance,
         disp=False,
@@ -1801,12 +1857,35 @@ def _factor_anchor_signs(results, panel_meta: pd.DataFrame) -> Dict[str, int]:
     return signs
 
 
-def oriented_factor_states(results, panel_meta: pd.DataFrame, kind: str = "smoothed") -> pd.DataFrame:
+def oriented_factor_states(
+    results,
+    panel_meta: pd.DataFrame,
+    kind: str = "smoothed",
+    standardize: bool = True,
+    center: bool = True,
+    scale_floor: float = 1e-6,
+) -> pd.DataFrame:
+    """
+    Orient latent factors using economically interpretable anchor loadings and
+    then normalize the exported state scale.
+
+    The sign of a state-space factor is unidentified, and the scale is only
+    identified up to a corresponding loading rescaling. Exporting centered,
+    unit-variance states therefore improves cross-vintage comparability without
+    altering the fitted signal that the model uses internally.
+    """
     factors_df = getattr(results.factors, kind).copy()
     signs = _factor_anchor_signs(results, panel_meta)
     for col in factors_df.columns:
         sign = signs.get(str(col), 1)
-        factors_df[col] = factors_df[col] * sign
+        series = pd.to_numeric(factors_df[col], errors="coerce") * sign
+        if standardize:
+            location = float(series.mean(skipna=True)) if center else 0.0
+            scale = float(series.std(skipna=True, ddof=0))
+            if not np.isfinite(scale) or scale < float(scale_floor):
+                scale = 1.0
+            series = (series - location) / scale if center else (series / scale)
+        factors_df[col] = series
     return factors_df
 
 
@@ -1859,6 +1938,16 @@ def make_diagnostics_row(
     llf_path = np.asarray(results.mle_retvals.get("llf", []), dtype=float)
     base_index = getattr(results.model, "_index", None)
     row_labels = getattr(getattr(results.model, "data", None), "row_labels", None)
+    mle_settings = getattr(results, "mle_settings", {}) or {}
+    em_iterations = int(results.mle_retvals.get("iter", np.nan))
+    em_tolerance_used = float(mle_settings.get("tolerance", np.nan))
+    em_maxiter_used = int(mle_settings.get("maxiter", np.nan))
+    em_delta_last = em_convergence_delta_from_llf(llf_path)
+    converged_flag = bool(
+        (np.isfinite(em_delta_last) and np.isfinite(em_tolerance_used) and em_delta_last <= em_tolerance_used)
+        or (np.isfinite(em_iterations) and np.isfinite(em_maxiter_used) and em_iterations < em_maxiter_used)
+    )
+
     return {
         "vintage_period": vintage_period,
         "vintage_timestamp_start": vintage_period.to_timestamp(),
@@ -1868,9 +1957,12 @@ def make_diagnostics_row(
         "n_monthly_obs": int(monthly_panel.shape[0]),
         "factor_order": int(factor_order),
         "llf_final": float(results.llf),
-        "em_iterations": int(results.mle_retvals.get("iter", np.nan)),
+        "em_iterations": em_iterations,
+        "em_tolerance_used": em_tolerance_used,
+        "em_maxiter_used": em_maxiter_used,
+        "em_convergence_delta_last": em_delta_last,
         "llf_path_json": json.dumps(llf_path.tolist()),
-        "converged_flag": bool(len(llf_path) < 2 or abs(llf_path[-1] - llf_path[-2]) <= 1e-4),
+        "converged_flag": converged_flag,
         "sample_end_period": monthly_panel.index.max(),
         "model_index_generated": bool(getattr(results.model, "_index_generated", False)),
         "model_index_type": type(base_index).__name__ if base_index is not None else None,
@@ -1966,6 +2058,7 @@ def run_layer1_dfm(config: ProtocolConfig) -> Dict[str, pd.DataFrame]:
     diagnostics_rows: List[Dict[str, Any]] = []
 
     prev_results = None
+    prev_panel_meta: Optional[pd.DataFrame] = None
     prev_nowcast = np.nan
     prev_vintage = None
 
@@ -2039,6 +2132,13 @@ def run_layer1_dfm(config: ProtocolConfig) -> Dict[str, pd.DataFrame]:
         else:
             factor_order = int(config.fixed_factor_order or config.candidate_factor_orders[0])
 
+        start_params = None
+        if config.warm_start_from_previous_vintage and prev_results is not None:
+            prev_monthly_names = list(prev_results.model.endog_names[: prev_results.model.k_endog_M])
+            current_monthly_names = list(monthly_panel.columns)
+            if prev_monthly_names == current_monthly_names:
+                start_params = getattr(prev_results, "params", None)
+
         model, results = fit_dfm_single_vintage(
             monthly_panel=monthly_panel,
             quarterly_target=quarterly_target,
@@ -2048,6 +2148,7 @@ def run_layer1_dfm(config: ProtocolConfig) -> Dict[str, pd.DataFrame]:
             em_maxiter=config.em_maxiter,
             em_tolerance=config.em_tolerance,
             quarterly_target_name="gdp_growth",
+            start_params=start_params,
         )
 
         nowcast_value = extract_nowcast_from_results(
@@ -2064,15 +2165,35 @@ def run_layer1_dfm(config: ProtocolConfig) -> Dict[str, pd.DataFrame]:
 
         observed_months = build_observed_months_by_series(monthly_panel, target_quarter)
 
-        factors_smoothed = oriented_factor_states(results, panel_meta, kind="smoothed")
+        factors_smoothed = oriented_factor_states(
+            results,
+            panel_meta,
+            kind="smoothed",
+            standardize=config.state_standardize,
+            center=config.state_center,
+            scale_floor=config.state_scale_floor,
+        )
         current_state = factors_smoothed.loc[[factors_smoothed.index.max()]].copy()
         current_state["vintage_period"] = vintage
         current_state["target_quarter"] = target_quarter
         current_state["state_kind"] = "current_smoothed"
         state_rows.append(current_state.reset_index().rename(columns={"index": "state_period"}))
 
+        pure_news_nowcast_value = np.nan
+        pure_news_revision = np.nan
+        full_refit_revision = np.nan if pd.isna(prev_nowcast) else nowcast_value - prev_nowcast
+        reestimation_effect = np.nan
+
         if prev_results is not None and prev_vintage is not None:
-            prev_factors_smoothed = oriented_factor_states(prev_results, panel_meta, kind="smoothed")
+            prev_meta_for_export = prev_panel_meta if prev_panel_meta is not None else panel_meta
+            prev_factors_smoothed = oriented_factor_states(
+                prev_results,
+                prev_meta_for_export,
+                kind="smoothed",
+                standardize=config.state_standardize,
+                center=config.state_center,
+                scale_floor=config.state_scale_floor,
+            )
             prev_state = prev_factors_smoothed.loc[[prev_factors_smoothed.index.max()]].copy()
             prev_state["vintage_period"] = vintage
             prev_state["target_quarter"] = target_quarter
@@ -2092,6 +2213,19 @@ def run_layer1_dfm(config: ProtocolConfig) -> Dict[str, pd.DataFrame]:
                 endog_quarterly=quarterly_target_model,
                 copy_initialization=True,
             )
+            pure_news_nowcast_value = extract_nowcast_from_results(
+                results=comparison_results,
+                vintage_period=vintage,
+                target_quarter=target_quarter,
+                quarterly_target_name="gdp_growth",
+            )
+            pure_news_revision = np.nan if pd.isna(prev_nowcast) else pure_news_nowcast_value - prev_nowcast
+            reestimation_effect = (
+                np.nan
+                if pd.isna(full_refit_revision) or pd.isna(pure_news_revision)
+                else full_refit_revision - pure_news_revision
+            )
+
             comparison_prediction_index = _prediction_index_from_model(comparison_results.model)
 
             impact_date = _coerce_impact_date_for_model_index(
@@ -2112,7 +2246,7 @@ def run_layer1_dfm(config: ProtocolConfig) -> Dict[str, pd.DataFrame]:
                 impacted_variable="gdp_growth",
                 original_scale=True,
             )
-            news_series, news_blocks = flatten_news_results(news, panel_meta, impacted_variable="gdp_growth")
+            news_series, news_blocks = flatten_news_results(news, prev_meta_for_export, impacted_variable="gdp_growth")
             news_series["vintage_period"] = vintage
             news_series["target_quarter"] = target_quarter
             news_blocks["vintage_period"] = vintage
@@ -2139,7 +2273,10 @@ def run_layer1_dfm(config: ProtocolConfig) -> Dict[str, pd.DataFrame]:
                 "target_quarter": target_quarter,
                 "within_quarter_origin": within_quarter_origin(vintage),
                 "dfm_nowcast": nowcast_value,
-                "dfm_nowcast_revision_from_previous": np.nan if pd.isna(prev_nowcast) else nowcast_value - prev_nowcast,
+                "dfm_nowcast_pure_news_fixed_params": pure_news_nowcast_value,
+                "dfm_nowcast_revision_from_previous": pure_news_revision,
+                "dfm_nowcast_revision_full_refit": full_refit_revision,
+                "dfm_nowcast_revision_reestimation_effect": reestimation_effect,
                 "monthly_snapshot_path": str(md_row.iloc[0]["path"]),
                 "observed_months_json": json.dumps(observed_months),
                 "n_monthly_series": int(monthly_panel.shape[1]),
@@ -2149,6 +2286,7 @@ def run_layer1_dfm(config: ProtocolConfig) -> Dict[str, pd.DataFrame]:
         )
 
         prev_results = results
+        prev_panel_meta = panel_meta.copy()
         prev_nowcast = nowcast_value
         prev_vintage = vintage
 
@@ -2161,7 +2299,10 @@ def run_layer1_dfm(config: ProtocolConfig) -> Dict[str, pd.DataFrame]:
                 "target_quarter",
                 "within_quarter_origin",
                 "dfm_nowcast",
+                "dfm_nowcast_pure_news_fixed_params",
                 "dfm_nowcast_revision_from_previous",
+                "dfm_nowcast_revision_full_refit",
+                "dfm_nowcast_revision_reestimation_effect",
                 "monthly_snapshot_path",
                 "observed_months_json",
                 "n_monthly_series",
@@ -2202,10 +2343,13 @@ def run_layer1_dfm(config: ProtocolConfig) -> Dict[str, pd.DataFrame]:
         ).drop(columns=["quarter"])
         nowcasts_df["dfm_residual_gdpplus"] = nowcasts_df["gdpplus"] - nowcasts_df["dfm_nowcast"]
 
-    if "dfm_residual_third_release" in nowcasts_df.columns and len(nowcasts_df):
-        nowcasts_df = nowcasts_df.sort_values(["within_quarter_origin", "target_quarter", "vintage_period"]).reset_index(drop=True)
-        nowcasts_df["residual_lag1_same_tau"] = nowcasts_df.groupby("within_quarter_origin")["dfm_residual_third_release"].shift(1)
-        nowcasts_df["residual_lag2_same_tau"] = nowcasts_df.groupby("within_quarter_origin")["dfm_residual_third_release"].shift(2)
+    nowcasts_df = nowcasts_df.sort_values(["vintage_period", "target_quarter"]).reset_index(drop=True)
+
+    if config.export_same_tau_residual_lags and "dfm_residual_third_release" in nowcasts_df.columns and len(nowcasts_df):
+        warnings.warn(
+            "Release-safe same-tau residual lags are disabled by default. "
+            "Only enable export_same_tau_residual_lags after implementing an explicit availability calendar."
+        )
 
     serialize_protocol(config, output_dir / "layer1_protocol.json")
     export_table(nowcasts_df, output_dir / "dfm_nowcasts.csv")

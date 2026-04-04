@@ -1,9 +1,9 @@
 source_family,manifest_vintage_period,path,path_exists,date_col,metadata_row_count,has_tcode_row,inferred_freq,min_timestamp_start,max_timestamp_start,max_timestamp_day,max_period_from_raw,expected_max_period_from_vintage,max_matches_expected,suspicious_month_end_coercion
 monthly_raw,1999-08,data/raw/Historical FRED-MD Vintages Final/1999-08.csv,True,sasdate,1.0,True,M,1959-01-01,1999-07-01,1,1999-07,1999-07,True,False
-monthly_raw,2012-06,data/raw/Historical FRED-MD Vintages Final/2012-06.csv,True,sasdate,1.0,True,M,1959-01-01,2012-05-01,1,2012-05,2012-05,True,False
+monthly_raw,2012-11,data/raw/Historical FRED-MD Vintages Final/2012-11.csv,True,sasdate,1.0,True,M,1959-01-01,2012-10-01,1,2012-10,2012-10,True,False
 monthly_raw,2026-02,data/raw/FRED-MD-MONTHLY/2026-02-MD.csv,True,sasdate,1.0,True,M,1959-01-01,2026-01-01,1,2026-01,2026-01,True,False
 quarterly_raw,2018-05,data/raw/Historical vintages of FRED-QD 2018-05 to 2024-12/FRED-QD_2018m05.csv,True,sasdate,2.0,True,Q,1959-01-01,2018-01-01,1,2018Q1,2018Q1,True,False
-quarterly_raw,2022-05,data/raw/Historical vintages of FRED-QD 2018-05 to 2024-12/FRED-QD_2022m05.csv,True,sasdate,2.0,True,Q,1959-01-01,2022-01-01,1,2022Q1,2022Q1,True,False
+quarterly_raw,2022-03,data/raw/Historical vintages of FRED-QD 2018-05 to 2024-12/FRED-QD_2022m03.csv,True,sasdate,2.0,True,Q,1959-01-01,2021-10-01,1,2021Q4,2021Q4,True,False
 quarterly_raw,2026-02,data/raw/FRED-QD-QUARTERLY/2026-02-QD.csv,True,sasdate,2.0,True,Q,1959-01-01,2025-10-01,1,2025Q4,2025Q4,True,False
 artifact::nowcasts,,nowcasts.vintage_timestamp_start,True,vintage_timestamp_start,,,timestamp_start,2000-01-01,2026-02-01,1,,,,False
 artifact::diagnostics,,diagnostics.vintage_timestamp_start,True,vintage_timestamp_start,,,timestamp_start,2000-01-01,2026-02-01,1,,,,False

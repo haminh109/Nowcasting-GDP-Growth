@@ -16,7 +16,12 @@
   "select_factor_order_per_vintage": false,
   "idiosyncratic_ar1": true,
   "em_maxiter": 100,
-  "em_tolerance": 1e-06,
+  "em_tolerance": 2e-06,
+  "warm_start_from_previous_vintage": true,
+  "export_same_tau_residual_lags": false,
+  "state_standardize": true,
+  "state_center": true,
+  "state_scale_floor": 1e-06,
   "vintage_limit": null,
   "min_monthly_obs": 24,
   "force_refit": true

@@ -1739,6 +1739,66 @@ housing_construction,Housing & construction,housing,6,0.3333333333333333,2024-02
 labor_market,Labor market,labor,8,0.3333333333333333,2024-02,2024Q1
 prices_inflation,Prices & inflation,prices,9,0.3333333333333333,2024-02,2024Q1
 real_activity_income,Real activity & income,real_activity,8,0.3333333333333333,2024-02,2024Q1
+demand_orders_inventories,Demand / orders / inventories,demand,9,0.5185185185185185,2024-03,2024Q1
+financial_conditions,Financial conditions,financial,10,0.6333333333333333,2024-03,2024Q1
+housing_construction,Housing & construction,housing,6,0.6666666666666666,2024-03,2024Q1
+labor_market,Labor market,labor,8,0.6666666666666666,2024-03,2024Q1
+prices_inflation,Prices & inflation,prices,9,0.6666666666666666,2024-03,2024Q1
+real_activity_income,Real activity & income,real_activity,8,0.6666666666666666,2024-03,2024Q1
+demand_orders_inventories,Demand / orders / inventories,demand,9,0.0,2024-04,2024Q2
+financial_conditions,Financial conditions,financial,10,0.0,2024-04,2024Q2
+housing_construction,Housing & construction,housing,6,0.0,2024-04,2024Q2
+labor_market,Labor market,labor,8,0.0,2024-04,2024Q2
+prices_inflation,Prices & inflation,prices,9,0.0,2024-04,2024Q2
+real_activity_income,Real activity & income,real_activity,8,0.0,2024-04,2024Q2
+demand_orders_inventories,Demand / orders / inventories,demand,9,0.18518518518518517,2024-05,2024Q2
+financial_conditions,Financial conditions,financial,10,0.3,2024-05,2024Q2
+housing_construction,Housing & construction,housing,6,0.3333333333333333,2024-05,2024Q2
+labor_market,Labor market,labor,8,0.3333333333333333,2024-05,2024Q2
+prices_inflation,Prices & inflation,prices,9,0.3333333333333333,2024-05,2024Q2
+real_activity_income,Real activity & income,real_activity,8,0.3333333333333333,2024-05,2024Q2
+demand_orders_inventories,Demand / orders / inventories,demand,9,0.5185185185185185,2024-06,2024Q2
+financial_conditions,Financial conditions,financial,10,0.6333333333333333,2024-06,2024Q2
+housing_construction,Housing & construction,housing,6,0.6666666666666666,2024-06,2024Q2
+labor_market,Labor market,labor,8,0.6666666666666666,2024-06,2024Q2
+prices_inflation,Prices & inflation,prices,9,0.6666666666666666,2024-06,2024Q2
+real_activity_income,Real activity & income,real_activity,8,0.6666666666666666,2024-06,2024Q2
+demand_orders_inventories,Demand / orders / inventories,demand,9,0.0,2024-07,2024Q3
+financial_conditions,Financial conditions,financial,10,0.0,2024-07,2024Q3
+housing_construction,Housing & construction,housing,6,0.0,2024-07,2024Q3
+labor_market,Labor market,labor,8,0.0,2024-07,2024Q3
+prices_inflation,Prices & inflation,prices,9,0.0,2024-07,2024Q3
+real_activity_income,Real activity & income,real_activity,8,0.0,2024-07,2024Q3
+demand_orders_inventories,Demand / orders / inventories,demand,9,0.18518518518518517,2024-08,2024Q3
+financial_conditions,Financial conditions,financial,10,0.3,2024-08,2024Q3
+housing_construction,Housing & construction,housing,6,0.3333333333333333,2024-08,2024Q3
+labor_market,Labor market,labor,8,0.3333333333333333,2024-08,2024Q3
+prices_inflation,Prices & inflation,prices,9,0.3333333333333333,2024-08,2024Q3
+real_activity_income,Real activity & income,real_activity,8,0.3333333333333333,2024-08,2024Q3
+demand_orders_inventories,Demand / orders / inventories,demand,9,0.5185185185185185,2024-09,2024Q3
+financial_conditions,Financial conditions,financial,10,0.6333333333333333,2024-09,2024Q3
+housing_construction,Housing & construction,housing,6,0.6666666666666666,2024-09,2024Q3
+labor_market,Labor market,labor,8,0.6666666666666666,2024-09,2024Q3
+prices_inflation,Prices & inflation,prices,9,0.6666666666666666,2024-09,2024Q3
+real_activity_income,Real activity & income,real_activity,8,0.6666666666666666,2024-09,2024Q3
+demand_orders_inventories,Demand / orders / inventories,demand,9,0.0,2024-10,2024Q4
+financial_conditions,Financial conditions,financial,10,0.0,2024-10,2024Q4
+housing_construction,Housing & construction,housing,6,0.0,2024-10,2024Q4
+labor_market,Labor market,labor,8,0.0,2024-10,2024Q4
+prices_inflation,Prices & inflation,prices,9,0.0,2024-10,2024Q4
+real_activity_income,Real activity & income,real_activity,8,0.0,2024-10,2024Q4
+demand_orders_inventories,Demand / orders / inventories,demand,9,0.18518518518518517,2024-11,2024Q4
+financial_conditions,Financial conditions,financial,10,0.3,2024-11,2024Q4
+housing_construction,Housing & construction,housing,6,0.3333333333333333,2024-11,2024Q4
+labor_market,Labor market,labor,8,0.3333333333333333,2024-11,2024Q4
+prices_inflation,Prices & inflation,prices,9,0.3333333333333333,2024-11,2024Q4
+real_activity_income,Real activity & income,real_activity,8,0.3333333333333333,2024-11,2024Q4
+demand_orders_inventories,Demand / orders / inventories,demand,9,0.48148148148148145,2024-12,2024Q4
+financial_conditions,Financial conditions,financial,10,0.6333333333333333,2024-12,2024Q4
+housing_construction,Housing & construction,housing,6,0.6666666666666666,2024-12,2024Q4
+labor_market,Labor market,labor,8,0.6666666666666666,2024-12,2024Q4
+prices_inflation,Prices & inflation,prices,9,0.6666666666666666,2024-12,2024Q4
+real_activity_income,Real activity & income,real_activity,8,0.6666666666666666,2024-12,2024Q4
 demand_orders_inventories,Demand / orders / inventories,demand,9,0.0,2025-01,2025Q1
 financial_conditions,Financial conditions,financial,10,0.0,2025-01,2025Q1
 housing_construction,Housing & construction,housing,6,0.0,2025-01,2025Q1

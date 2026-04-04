@@ -1,68 +1,28 @@
 {
   "gate_decision": "NOT READY FOR LAYER 2",
-  "overall_score_pct": 85.28,
+  "overall_score_pct": 95.47,
   "checks_total": 47,
-  "checks_passed": 41,
-  "checks_failed": 6,
+  "checks_passed": 45,
+  "checks_failed": 2,
   "critical_failures": [
     {
-      "check_id": "layer2_leakage__same_tau_residual_lags_are_ex_post",
-      "message": "Layer 2 candidate lag features do not inject ex post third-release residual information into pseudo-real-time rows.",
-      "details": "The current Layer 1 export constructs residual_lag1_same_tau and residual_lag2_same_tau from dfm_residual_third_release grouped by within_quarter_origin. Those values are not automatically real-time safe unless their release availability is explicitly calendar-gated before Layer 2 training and inference."
+      "check_id": "vintage_protocol__snapshot_path_matches_vintage",
+      "message": "Each nowcast row points to the monthly snapshot corresponding to the same vintage.",
+      "details": "The validation parses the vintage directly from monthly_snapshot_path and compares it to vintage_period."
     }
   ],
   "major_failures": [
     {
-      "check_id": "integrity__no_unexplained_internal_vintage_gaps",
-      "message": "The estimated nowcast panel covers the full internal monthly span without unexplained vintage gaps.",
-      "details": "Missing monthly vintages inside the estimation span: ['2024-03', '2024-04', '2024-05', '2024-06', '2024-07', '2024-08', '2024-09', '2024-10', '2024-11', '2024-12']"
-    },
-    {
-      "check_id": "estimation__convergence_rate_acceptable",
-      "message": "A large majority of vintages satisfy the notebook's own convergence flag.",
-      "details": "Observed convergence share=0.000."
-    },
-    {
-      "check_id": "estimation__maxiter_not_routinely_hit",
-      "message": "Most vintages converge before hitting the configured EM iteration cap.",
-      "details": "Observed share below maxiter=0.125."
-    },
-    {
-      "check_id": "estimation__state_vectors_finite_and_bounded",
-      "message": "Exported factor-state vectors are finite and do not exhibit explosive magnitudes.",
-      "details": "state_nonfinite_count=0, max_abs_state=59.45027425582935."
-    },
-    {
       "check_id": "news__block_news_reconciles_to_revision_within_loose_tolerance",
       "message": "Block-level news approximately reconciles with the nowcast revision across vintages.",
-      "details": "Loose-pass share=0.795; median abs gap=0.2071."
+      "details": "Loose-pass share=0.792; median abs gap=0.2338."
     }
   ],
   "warnings": [
     {
-      "check_id": "integrity__no_unexplained_internal_vintage_gaps",
-      "message": "The estimated nowcast panel covers the full internal monthly span without unexplained vintage gaps.",
-      "details": "Missing monthly vintages inside the estimation span: ['2024-03', '2024-04', '2024-05', '2024-06', '2024-07', '2024-08', '2024-09', '2024-10', '2024-11', '2024-12']"
-    },
-    {
-      "check_id": "estimation__convergence_rate_acceptable",
-      "message": "A large majority of vintages satisfy the notebook's own convergence flag.",
-      "details": "Observed convergence share=0.000."
-    },
-    {
-      "check_id": "estimation__maxiter_not_routinely_hit",
-      "message": "Most vintages converge before hitting the configured EM iteration cap.",
-      "details": "Observed share below maxiter=0.125."
-    },
-    {
-      "check_id": "estimation__state_vectors_finite_and_bounded",
-      "message": "Exported factor-state vectors are finite and do not exhibit explosive magnitudes.",
-      "details": "state_nonfinite_count=0, max_abs_state=59.45027425582935."
-    },
-    {
       "check_id": "news__block_news_reconciles_to_revision_within_loose_tolerance",
       "message": "Block-level news approximately reconciles with the nowcast revision across vintages.",
-      "details": "Loose-pass share=0.795; median abs gap=0.2071."
+      "details": "Loose-pass share=0.792; median abs gap=0.2338."
     }
   ],
   "passed_checks": [
@@ -143,16 +103,20 @@
       "message": "The model sample ends exactly one month before the vintage marker, consistent with first-of-month vintage semantics."
     },
     {
-      "check_id": "vintage_protocol__snapshot_path_matches_vintage",
-      "message": "Each nowcast row points to the monthly snapshot corresponding to the same vintage."
-    },
-    {
       "check_id": "leakage__current_quarter_month_cap",
       "message": "No series uses more current-quarter monthly observations than the vintage should permit."
     },
     {
       "check_id": "leakage__no_future_quarterly_target_values",
       "message": "The quarterly GDP target history does not leak the target quarter or any later quarter into pseudo-real-time model inputs."
+    },
+    {
+      "check_id": "layer2_leakage__same_tau_residual_lags_are_ex_post",
+      "message": "Layer 2 candidate lag features do not inject ex post third-release residual information into pseudo-real-time rows."
+    },
+    {
+      "check_id": "integrity__no_unexplained_internal_vintage_gaps",
+      "message": "The estimated nowcast panel covers the full internal monthly span without unexplained vintage gaps."
     },
     {
       "check_id": "transformations__stable_tcodes_match_raw_metadata",
@@ -185,6 +149,18 @@
     {
       "check_id": "estimation__llf_paths_monotone",
       "message": "EM log-likelihood paths are monotone non-decreasing across vintages."
+    },
+    {
+      "check_id": "estimation__convergence_rate_acceptable",
+      "message": "A large majority of vintages satisfy the notebook's own convergence flag."
+    },
+    {
+      "check_id": "estimation__maxiter_not_routinely_hit",
+      "message": "Most vintages converge before hitting the configured EM iteration cap."
+    },
+    {
+      "check_id": "estimation__state_vectors_finite_and_bounded",
+      "message": "Exported factor-state vectors are finite and do not exhibit explosive magnitudes."
     },
     {
       "check_id": "estimation__standardization_stds_positive",
@@ -232,15 +208,11 @@
     }
   ],
   "remediation_items": [
-    "Drop these columns from Layer 2 features or rebuild them using a release-calendar-safe availability rule.",
-    "Explain or repair any missing vintages inside the pseudo-real-time sample before using Layer 1 as a stable backbone for Layer 2.",
-    "Increase EM iterations, stabilize factor order, or tighten initialization logic before treating Layer 1 as production-stable.",
-    "Raise the EM cap or revisit model specification if most vintages terminate at the hard limit.",
-    "Inspect the exported states and model scaling if state magnitudes are non-finite or implausibly large.",
+    "Repair artifact joins if any nowcast row references the wrong source snapshot.",
     "Separate pure-news revision effects from parameter re-estimation effects, or export the full revision decomposition explicitly."
   ],
-  "layer2_candidate_rows": 304,
-  "layer2_residual_target_rows": 296,
+  "layer2_candidate_rows": 314,
+  "layer2_residual_target_rows": 306,
   "mostly_missing_features": [],
   "validation_artifacts_dir": "/Users/haaminh109/Desktop/Minh/Tài liệu học tập (DSEB)/Kì 6/Time Series/Final Project/Test/hybrid_dfm_ml_nowcasting/outputs/layer1_dfm/validation"
 }

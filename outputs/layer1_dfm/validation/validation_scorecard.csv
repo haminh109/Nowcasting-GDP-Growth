@@ -1,13 +1,13 @@
 area,checks_total,checks_passed,total_weight,score_awarded,critical,major,score_pct
 benchmarks,1,1,6.0,6.0,0,0,100.0
 date_convention,3,3,20.0,20.0,0,0,100.0
-estimation_stability,6,3,35.0,17.0,0,3,48.57142857142857
+estimation_stability,6,6,35.0,35.0,0,0,100.0
 internal_consistency,3,3,17.0,17.0,0,0,100.0
-layer2_readiness,5,4,31.0,21.0,1,0,67.74193548387096
+layer2_readiness,5,5,31.0,31.0,0,0,100.0
 leakage,2,2,17.0,17.0,0,0,100.0
 mixed_frequency_alignment,1,1,6.0,6.0,0,0,100.0
 news_reconciliation,3,2,13.0,7.0,0,1,53.84615384615385
 pseudo_realtime_performance,2,2,9.0,9.0,0,0,100.0
-repository_integrity,14,13,66.0,61.0,0,1,92.42424242424242
+repository_integrity,14,14,66.0,66.0,0,0,100.0
 transformations,4,4,23.0,23.0,0,0,100.0
-vintage_protocol,3,3,22.0,22.0,0,0,100.0
+vintage_protocol,3,2,22.0,16.0,1,0,72.72727272727273
