@@ -1953,6 +1953,40 @@ def oriented_factor_states(
     return factors_df
 
 
+def _resolve_news_metadata(
+    updated_variable: Any,
+    impacted_variable: str,
+    meta_lookup: Mapping[str, Mapping[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    if updated_variable is None or (isinstance(updated_variable, float) and np.isnan(updated_variable)):
+        return None
+
+    key = str(updated_variable)
+    mapped = meta_lookup.get(key)
+    if mapped is not None:
+        return {
+            "block": mapped.get("block"),
+            "block_label": mapped.get("block_label"),
+            "factor_name": mapped.get("factor_name"),
+            "mapping_status": "mapped_panel_series",
+        }
+
+    if key == str(impacted_variable):
+        return {
+            "block": "quarterly_target_history",
+            "block_label": "Quarterly target history",
+            "factor_name": "quarterly_target",
+            "mapping_status": "quarterly_target_history",
+        }
+
+    return {
+        "block": "unmapped_series",
+        "block_label": "Unmapped series",
+        "factor_name": "unmapped",
+        "mapping_status": "unmapped",
+    }
+
+
 def flatten_news_results(
     news_results,
     panel_meta: pd.DataFrame,
@@ -1970,15 +2004,36 @@ def flatten_news_results(
     if impact_var_col in details.columns:
         details = details[details[impact_var_col].astype(str) == impacted_variable].copy()
 
-    if updated_var_col in details.columns:
-        details["block"] = details[updated_var_col].map(lambda x: meta_lookup.get(str(x), {}).get("block"))
-        details["block_label"] = details[updated_var_col].map(lambda x: meta_lookup.get(str(x), {}).get("block_label"))
-        details["factor_name"] = details[updated_var_col].map(lambda x: meta_lookup.get(str(x), {}).get("factor_name"))
+    if updated_var_col in details.columns and len(details):
+        resolved_meta = details[updated_var_col].map(
+            lambda x: _resolve_news_metadata(
+                updated_variable=x,
+                impacted_variable=impacted_variable,
+                meta_lookup=meta_lookup,
+            )
+        )
+        for field in ["block", "block_label", "factor_name", "mapping_status"]:
+            details[field] = resolved_meta.map(
+                lambda payload: payload.get(field) if isinstance(payload, Mapping) else np.nan
+            )
+    else:
+        details["block"] = np.nan
+        details["block_label"] = np.nan
+        details["factor_name"] = np.nan
+        details["mapping_status"] = np.nan
 
     numeric_cols = ["observed", "forecast_(prev)", "news", "weight", "impact"]
     for col in numeric_cols:
         if col in details.columns:
             details[col] = pd.to_numeric(details[col], errors="coerce")
+
+    # Drop placeholder rows that contain no actual update payload.
+    if len(details):
+        informative_mask = pd.Series(False, index=details.index)
+        for col in [updated_var_col, "impact_date", "impact", "news"]:
+            if col in details.columns:
+                informative_mask = informative_mask | details[col].notna()
+        details = details.loc[informative_mask].copy()
 
     block_news = (
         details.groupby(["impact_date", "block", "block_label", "factor_name"], dropna=False)["impact"]
@@ -1988,6 +2043,9 @@ def flatten_news_results(
     )
     if not block_news.empty:
         block_news["abs_block_news"] = block_news["signed_block_news"].abs()
+        block_news = block_news.loc[
+            block_news["block"].notna() | block_news["signed_block_news"].notna()
+        ].copy()
 
     return details, block_news
 
@@ -2337,8 +2395,41 @@ def run_layer1_dfm(config: ProtocolConfig) -> Dict[str, pd.DataFrame]:
             news_series_rows.append(news_series)
             news_block_rows.append(news_blocks)
         else:
-            news_series_rows.append(pd.DataFrame({"vintage_period": [vintage], "target_quarter": [target_quarter]}))
-            news_block_rows.append(pd.DataFrame({"vintage_period": [vintage], "target_quarter": [target_quarter]}))
+            news_series_rows.append(
+                pd.DataFrame(
+                    columns=[
+                        "update_date",
+                        "updated_variable",
+                        "observed",
+                        "forecast_(prev)",
+                        "impact_date",
+                        "impacted_variable",
+                        "news",
+                        "weight",
+                        "impact",
+                        "block",
+                        "block_label",
+                        "factor_name",
+                        "mapping_status",
+                        "vintage_period",
+                        "target_quarter",
+                    ]
+                )
+            )
+            news_block_rows.append(
+                pd.DataFrame(
+                    columns=[
+                        "impact_date",
+                        "block",
+                        "block_label",
+                        "factor_name",
+                        "signed_block_news",
+                        "abs_block_news",
+                        "vintage_period",
+                        "target_quarter",
+                    ]
+                )
+            )
 
         diag = make_diagnostics_row(
             vintage_period=vintage,
@@ -2415,6 +2506,32 @@ def run_layer1_dfm(config: ProtocolConfig) -> Dict[str, pd.DataFrame]:
     coverage_df = pd.concat(coverage_rows, ignore_index=True) if coverage_rows else pd.DataFrame()
     diagnostics_df = pd.DataFrame(diagnostics_rows)
 
+    if not news_series_df.empty:
+        informative_mask = pd.Series(False, index=news_series_df.index)
+        for col in ["updated_variable", "impact_date", "impact", "news"]:
+            if col in news_series_df.columns:
+                informative_mask = informative_mask | news_series_df[col].notna()
+        news_series_df = news_series_df.loc[informative_mask].copy()
+        news_series_df = news_series_df.sort_values(
+            [c for c in ["vintage_period", "target_quarter", "update_date", "updated_variable"] if c in news_series_df.columns]
+        ).reset_index(drop=True)
+
+    if not news_blocks_df.empty:
+        informative_mask = pd.Series(False, index=news_blocks_df.index)
+        for col in ["block", "impact_date", "signed_block_news", "abs_block_news"]:
+            if col in news_blocks_df.columns:
+                informative_mask = informative_mask | news_blocks_df[col].notna()
+        news_blocks_df = news_blocks_df.loc[informative_mask].copy()
+        news_blocks_df = news_blocks_df.sort_values(
+            [c for c in ["vintage_period", "target_quarter", "impact_date", "block"] if c in news_blocks_df.columns]
+        ).reset_index(drop=True)
+
+    if not coverage_df.empty:
+        coverage_df = coverage_df.sort_values(["vintage_period", "target_quarter", "block"]).reset_index(drop=True)
+
+    if not states_df.empty:
+        states_df = states_df.sort_values(["vintage_period", "target_quarter", "state_kind", "state_period"]).reset_index(drop=True)
+
     if "truth_third_release" in target_objects and "target_quarter" in nowcasts_df.columns:
         nowcasts_df = nowcasts_df.merge(
             target_objects["truth_third_release"],
@@ -2450,10 +2567,19 @@ def run_layer1_dfm(config: ProtocolConfig) -> Dict[str, pd.DataFrame]:
             "Only enable export_same_tau_residual_lags after implementing an explicit availability calendar."
         )
 
+    layer2_bundle = build_layer2_residual_design(
+        nowcasts_df=nowcasts_df,
+        diagnostics_df=diagnostics_df,
+        coverage_df=coverage_df,
+        news_blocks_df=news_blocks_df,
+        states_df=states_df,
+    )
+
     serialize_protocol(config, output_dir / "layer1_protocol.json")
     export_table(nowcasts_df, output_dir / "dfm_nowcasts.csv")
     if not states_df.empty:
         export_table(states_df, output_dir / "dfm_states.parquet")
+        export_table(states_df, output_dir / "dfm_states.csv")
     if not news_series_df.empty:
         export_table(news_series_df, output_dir / "dfm_news_series.csv")
     if not news_blocks_df.empty:
@@ -2464,6 +2590,7 @@ def run_layer1_dfm(config: ProtocolConfig) -> Dict[str, pd.DataFrame]:
     export_table(md_manifest, output_dir / "vintage_manifest_monthly.csv")
     export_table(qd_manifest, output_dir / "vintage_manifest_quarterly.csv")
     export_table(catalog, output_dir / "repository_catalog.csv")
+    export_layer2_handoff_package(layer2_bundle, output_dir)
 
     return {
         "catalog": catalog,
@@ -2475,8 +2602,318 @@ def run_layer1_dfm(config: ProtocolConfig) -> Dict[str, pd.DataFrame]:
         "news_blocks": news_blocks_df,
         "coverage": coverage_df,
         "diagnostics": diagnostics_df,
+        "layer2_design": layer2_bundle["design"],
+        "layer2_feature_manifest": layer2_bundle["feature_manifest"],
+        "layer2_data_contract": layer2_bundle["data_contract"],
         **target_objects,
     }
+
+
+# --------------------------------------------------------------------------------------
+# Layer 2 handoff helpers
+# --------------------------------------------------------------------------------------
+
+LAYER2_PRIMARY_TARGET = "dfm_residual_third_release"
+LAYER2_ROBUSTNESS_TARGETS: Tuple[str, ...] = ("dfm_residual_latest_rtdsm", "dfm_residual_gdpplus")
+LAYER2_METADATA_COLUMNS: Tuple[str, ...] = (
+    "vintage_period",
+    "vintage_timestamp_start",
+    "target_quarter",
+    "within_quarter_origin",
+)
+LAYER2_TARGET_COLUMNS: Tuple[str, ...] = (
+    "third_release",
+    "dfm_residual_third_release",
+    "latest_rtdsm",
+    "dfm_residual_latest_rtdsm",
+    "gdpplus",
+    "dfm_residual_gdpplus",
+)
+LAYER2_BACKBONE_FEATURE_COLUMNS: Tuple[str, ...] = (
+    "dfm_nowcast",
+    "dfm_nowcast_pure_news_fixed_params",
+    "dfm_nowcast_previous_vintage_same_target",
+    "dfm_nowcast_revision_from_previous",
+    "dfm_nowcast_revision_full_refit",
+    "dfm_nowcast_revision_reestimation_effect",
+    "dfm_nowcast_delta_from_previous_row",
+    "dfm_nowcast_delta_from_previous_row_fixed_params",
+    "n_monthly_series",
+)
+LAYER2_DIAGNOSTIC_FEATURE_COLUMNS: Tuple[str, ...] = (
+    "n_monthly_obs",
+    "factor_order",
+    "llf_final",
+    "em_iterations",
+    "em_convergence_delta_last",
+)
+LAYER2_AUDIT_ONLY_NOWCAST_COLUMNS: Tuple[str, ...] = (
+    "monthly_snapshot_path",
+    "monthly_snapshot_source_path",
+    "observed_months_json",
+    "model_endog_mean_json",
+    "model_endog_std_json",
+)
+LAYER2_AUDIT_ONLY_DIAGNOSTIC_COLUMNS: Tuple[str, ...] = (
+    "vintage_timestamp_start",
+    "em_tolerance_used",
+    "em_maxiter_used",
+    "llf_path_json",
+    "converged_flag",
+    "sample_end_period",
+    "model_index_generated",
+    "model_index_type",
+    "model_index_monotonic",
+    "row_labels_type",
+    "row_labels_monotonic",
+)
+
+
+def _layer2_feature_group(column: str) -> str:
+    if column.startswith("dfm_nowcast"):
+        return "dfm_backbone"
+    if column.startswith("coverage__"):
+        return "coverage"
+    if column.startswith("n_series__"):
+        return "coverage_counts"
+    if column.startswith("news_signed__") or column.startswith("news_abs__"):
+        return "news_blocks"
+    if column.startswith("state__"):
+        return "factor_states"
+    if column in set(LAYER2_DIAGNOSTIC_FEATURE_COLUMNS):
+        return "diagnostics"
+    return "other_features"
+
+
+def _layer2_source_artifact(column: str) -> str:
+    if column in set(LAYER2_BACKBONE_FEATURE_COLUMNS):
+        return "dfm_nowcasts.csv"
+    if column in set(LAYER2_DIAGNOSTIC_FEATURE_COLUMNS):
+        return "dfm_diagnostics.csv"
+    if column.startswith("coverage__") or column.startswith("n_series__"):
+        return "dfm_coverage.csv"
+    if column.startswith("news_signed__") or column.startswith("news_abs__"):
+        return "dfm_news_blocks.csv"
+    if column.startswith("state__"):
+        return "dfm_states.parquet|csv"
+    return "layer2_residual_design.parquet|csv"
+
+
+def build_layer2_residual_design(
+    nowcasts_df: pd.DataFrame,
+    diagnostics_df: pd.DataFrame,
+    coverage_df: Optional[pd.DataFrame] = None,
+    news_blocks_df: Optional[pd.DataFrame] = None,
+    states_df: Optional[pd.DataFrame] = None,
+    primary_target: str = LAYER2_PRIMARY_TARGET,
+    robustness_targets: Sequence[str] = LAYER2_ROBUSTNESS_TARGETS,
+    drop_constant_features: bool = True,
+    exclude_unmapped_news: bool = True,
+) -> Dict[str, Any]:
+    if nowcasts_df is None or nowcasts_df.empty:
+        empty_design = pd.DataFrame(columns=list(LAYER2_METADATA_COLUMNS) + list(LAYER2_TARGET_COLUMNS))
+        return {
+            "design": empty_design,
+            "feature_manifest": pd.DataFrame(),
+            "data_contract": {
+                "primary_training_table_name": "layer2_residual_design.parquet|csv",
+                "row_grain": "one row per (vintage_period, target_quarter)",
+                "primary_key": ["vintage_period", "target_quarter"],
+                "primary_target": primary_target,
+                "robustness_targets": [c for c in robustness_targets],
+                "metadata_columns": [c for c in LAYER2_METADATA_COLUMNS],
+                "feature_columns": [],
+                "forbidden_feature_columns": [],
+                "audit_only_fields": [c for c in LAYER2_AUDIT_ONLY_NOWCAST_COLUMNS] + [c for c in LAYER2_AUDIT_ONLY_DIAGNOSTIC_COLUMNS],
+                "required_preprocessing": [
+                    "respect first-day-of-month / first-day-of-quarter date semantics",
+                    "use time-aware validation splits",
+                    "fit any scaler or imputer inside each training fold only",
+                ],
+            },
+        }
+
+    metadata_cols = [c for c in LAYER2_METADATA_COLUMNS if c in nowcasts_df.columns]
+    target_cols = [c for c in LAYER2_TARGET_COLUMNS if c in nowcasts_df.columns]
+    backbone_cols = [c for c in LAYER2_BACKBONE_FEATURE_COLUMNS if c in nowcasts_df.columns]
+
+    design = nowcasts_df[metadata_cols + backbone_cols + target_cols].copy()
+
+    diag_join_keys = [c for c in ["vintage_period", "target_quarter", "within_quarter_origin", "n_monthly_series"] if c in design.columns and c in diagnostics_df.columns]
+    diag_keep_cols = [c for c in LAYER2_DIAGNOSTIC_FEATURE_COLUMNS if c in diagnostics_df.columns]
+    if len(diag_join_keys) >= 2 and len(diag_keep_cols):
+        diag_export = diagnostics_df[diag_join_keys + [c for c in diag_keep_cols if c not in diag_join_keys]].drop_duplicates(subset=diag_join_keys)
+        design = design.merge(diag_export, on=diag_join_keys, how="left")
+
+    if coverage_df is not None and not coverage_df.empty:
+        coverage_pivot = (
+            coverage_df.pivot_table(index=["vintage_period", "target_quarter"], columns="block", values="coverage", aggfunc="first")
+            .add_prefix("coverage__")
+            .reset_index()
+        )
+        n_series_pivot = (
+            coverage_df.pivot_table(index=["vintage_period", "target_quarter"], columns="block", values="n_series", aggfunc="first")
+            .add_prefix("n_series__")
+            .reset_index()
+        )
+        design = design.merge(coverage_pivot, on=["vintage_period", "target_quarter"], how="left")
+        design = design.merge(n_series_pivot, on=["vintage_period", "target_quarter"], how="left")
+
+    if news_blocks_df is not None and not news_blocks_df.empty:
+        news_work = news_blocks_df.copy()
+        if "block" in news_work.columns:
+            news_work["block"] = news_work["block"].astype(object)
+            if exclude_unmapped_news:
+                news_work = news_work.loc[news_work["block"] != "unmapped_series"].copy()
+            news_work = news_work.loc[news_work["block"].notna()].copy()
+        if len(news_work):
+            news_signed = (
+                news_work.groupby(["vintage_period", "target_quarter", "block"], dropna=False)["signed_block_news"]
+                .sum(min_count=1)
+                .unstack("block")
+                .add_prefix("news_signed__")
+                .reset_index()
+            )
+            news_abs = (
+                news_work.groupby(["vintage_period", "target_quarter", "block"], dropna=False)["abs_block_news"]
+                .sum(min_count=1)
+                .unstack("block")
+                .add_prefix("news_abs__")
+                .reset_index()
+            )
+            design = design.merge(news_signed, on=["vintage_period", "target_quarter"], how="left")
+            design = design.merge(news_abs, on=["vintage_period", "target_quarter"], how="left")
+
+    state_feature_cols_added: List[str] = []
+    if states_df is not None and not states_df.empty:
+        state_num_cols = [
+            c
+            for c in states_df.columns
+            if c not in {"vintage_period", "target_quarter", "state_kind", "state_period"} and pd.api.types.is_numeric_dtype(states_df[c])
+        ]
+        for state_kind, sub in states_df.groupby("state_kind", dropna=False):
+            sub = sub.sort_values("state_period").drop_duplicates(subset=["vintage_period", "target_quarter"], keep="last")
+            keep_cols = ["vintage_period", "target_quarter"] + state_num_cols
+            renamed = sub[keep_cols].copy()
+            prefix = f"state__{state_kind}__"
+            renamed = renamed.rename(columns={c: f"{prefix}{c}" for c in state_num_cols})
+            new_cols = [f"{prefix}{c}" for c in state_num_cols]
+            state_feature_cols_added.extend(new_cols)
+            design = design.merge(renamed, on=["vintage_period", "target_quarter"], how="left")
+
+    design = design.sort_values(["vintage_period", "target_quarter"]).reset_index(drop=True)
+    design["primary_target_available"] = design[primary_target].notna() if primary_target in design.columns else False
+
+    raw_feature_cols = [
+        c
+        for c in design.columns
+        if c not in set(metadata_cols)
+        and c not in set(target_cols)
+        and c != "primary_target_available"
+    ]
+
+    excluded_reasons: Dict[str, str] = {}
+    for col in list(raw_feature_cols):
+        if "__nan" in col:
+            excluded_reasons[col] = "ambiguous_null_named_feature"
+        if "unmapped_series" in col:
+            excluded_reasons[col] = "unmapped_news_block"
+
+    if drop_constant_features:
+        for col in raw_feature_cols:
+            if col in excluded_reasons:
+                continue
+            if design[col].nunique(dropna=False) <= 1:
+                excluded_reasons[col] = "constant_over_export_window"
+
+    included_feature_cols = [c for c in raw_feature_cols if c not in excluded_reasons]
+
+    final_cols = metadata_cols + ["primary_target_available"] + target_cols + included_feature_cols
+    design_final = design[final_cols].copy()
+
+    manifest_rows: List[Dict[str, Any]] = []
+    for col in design.columns:
+        role = "feature"
+        included = col in included_feature_cols
+        exclusion_reason = excluded_reasons.get(col)
+        if col in metadata_cols:
+            role = "metadata"
+            included = False
+        elif col in target_cols:
+            role = "target"
+            included = False
+        elif col == "primary_target_available":
+            role = "train_sample_flag"
+            included = False
+
+        if col in set(LAYER2_AUDIT_ONLY_NOWCAST_COLUMNS) or col in set(LAYER2_AUDIT_ONLY_DIAGNOSTIC_COLUMNS):
+            role = "audit_only"
+            included = False
+            exclusion_reason = exclusion_reason or "audit_only_field"
+
+        manifest_rows.append(
+            {
+                "column": col,
+                "role": role,
+                "feature_group": _layer2_feature_group(col) if role == "feature" else role,
+                "source_artifact": _layer2_source_artifact(col) if role == "feature" else None,
+                "dtype": str(design[col].dtype),
+                "nonmissing_share": float(design[col].notna().mean()),
+                "included_in_training_matrix": bool(included),
+                "exclusion_reason": exclusion_reason,
+            }
+        )
+
+    audit_only_fields = [c for c in LAYER2_AUDIT_ONLY_NOWCAST_COLUMNS if c in nowcasts_df.columns] + [
+        c for c in LAYER2_AUDIT_ONLY_DIAGNOSTIC_COLUMNS if c in diagnostics_df.columns
+    ]
+    forbidden_feature_columns = sorted(set(excluded_reasons).union(audit_only_fields))
+
+    contract = {
+        "primary_training_table_name": "layer2_residual_design.parquet|csv",
+        "row_grain": "one row per (vintage_period, target_quarter)",
+        "primary_key": ["vintage_period", "target_quarter"],
+        "primary_target": primary_target,
+        "robustness_targets": [c for c in robustness_targets if c in design_final.columns],
+        "train_sample_flag": "primary_target_available",
+        "metadata_columns": metadata_cols,
+        "feature_columns": included_feature_cols,
+        "feature_families": {
+            group: [c for c in included_feature_cols if _layer2_feature_group(c) == group]
+            for group in sorted({_layer2_feature_group(c) for c in included_feature_cols})
+        },
+        "forbidden_feature_columns": forbidden_feature_columns,
+        "audit_only_fields": audit_only_fields,
+        "required_preprocessing": [
+            "respect first-day-of-month / first-day-of-quarter date semantics exactly",
+            "parse vintage_period as monthly period and target_quarter as quarterly period",
+            "use time-aware splits for pseudo-real-time evaluation",
+            "fit any imputer or scaler inside each training fold only",
+        ],
+    }
+
+    return {
+        "design": design_final,
+        "feature_manifest": pd.DataFrame(manifest_rows),
+        "data_contract": contract,
+        "state_feature_cols_added": state_feature_cols_added,
+        "excluded_feature_columns": excluded_reasons,
+    }
+
+
+def export_layer2_handoff_package(layer2_bundle: Mapping[str, Any], output_dir: Path) -> None:
+    design = layer2_bundle.get("design")
+    feature_manifest = layer2_bundle.get("feature_manifest")
+    data_contract = layer2_bundle.get("data_contract", {})
+
+    if isinstance(design, pd.DataFrame):
+        export_table(design, output_dir / "layer2_residual_design.parquet")
+        export_table(design, output_dir / "layer2_residual_design.csv")
+    if isinstance(feature_manifest, pd.DataFrame):
+        export_table(feature_manifest, output_dir / "layer2_feature_manifest.csv")
+    with open(output_dir / "layer2_data_contract.json", "w", encoding="utf-8") as f:
+        json.dump(data_contract, f, indent=2, default=str)
+
 
 # --------------------------------------------------------------------------------------
 # Presentation helpers for the notebook
@@ -2496,6 +2933,9 @@ def completion_checklist_frame(output_dir: Path) -> pd.DataFrame:
         ("dfm_news_blocks.csv", ["dfm_news_blocks.csv"]),
         ("dfm_coverage.csv", ["dfm_coverage.csv"]),
         ("dfm_diagnostics.csv", ["dfm_diagnostics.csv"]),
+        ("layer2_residual_design.parquet|csv", ["layer2_residual_design.parquet", "layer2_residual_design.csv"]),
+        ("layer2_feature_manifest.csv", ["layer2_feature_manifest.csv"]),
+        ("layer2_data_contract.json", ["layer2_data_contract.json"]),
         ("vintage_manifest_monthly.csv", ["vintage_manifest_monthly.csv"]),
         ("vintage_manifest_quarterly.csv", ["vintage_manifest_quarterly.csv"]),
         ("repository_catalog.csv", ["repository_catalog.csv"]),

@@ -1,8 +1,8 @@
 {
   "gate_decision": "READY FOR LAYER 2",
   "overall_score_pct": 100.0,
-  "checks_total": 47,
-  "checks_passed": 47,
+  "checks_total": 48,
+  "checks_passed": 48,
   "checks_failed": 0,
   "critical_failures": [],
   "major_failures": [],
@@ -182,7 +182,7 @@
     },
     {
       "check_id": "layer2__design_table_has_unique_keys",
-      "message": "The Layer 2 candidate design table is unique on (vintage_period, target_quarter)."
+      "message": "The exported Layer 2 design table is unique on (vintage_period, target_quarter)."
     },
     {
       "check_id": "layer2__residual_target_sample_size_adequate",
@@ -190,16 +190,24 @@
     },
     {
       "check_id": "layer2__feature_matrix_not_mostly_missing",
-      "message": "The candidate Layer 2 feature matrix is not dominated by mostly missing columns."
+      "message": "The exported Layer 2 feature matrix is not dominated by mostly missing columns."
     },
     {
       "check_id": "layer2__state_features_available",
-      "message": "Factor-state features are available for Layer 2 feature engineering."
+      "message": "Factor-state features are available in the exported Layer 2 handoff package."
+    },
+    {
+      "check_id": "layer2__no_ambiguous_named_news_features",
+      "message": "The exported Layer 2 handoff package contains no ambiguous null-named or unmapped news features."
     }
   ],
   "remediation_items": [],
   "layer2_candidate_rows": 314,
   "layer2_residual_target_rows": 306,
+  "layer2_feature_count": 50,
   "mostly_missing_features": [],
+  "layer2_table_path": "outputs/layer1_dfm/layer2_residual_design.parquet",
+  "layer2_feature_manifest_path": "outputs/layer1_dfm/layer2_feature_manifest.csv",
+  "layer2_data_contract_path": "outputs/layer1_dfm/layer2_data_contract.json",
   "validation_artifacts_dir": "/Users/haaminh109/Desktop/Minh/Tài liệu học tập (DSEB)/Kì 6/Time Series/Final Project/Test/hybrid_dfm_ml_nowcasting/outputs/layer1_dfm/validation"
 }
